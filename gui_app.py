@@ -7,9 +7,8 @@ import site
 import subprocess
 import sys
 import time
+from datetime import datetime
 from typing import Optional, Dict, Any, List
-
-
 
 # Ensure user site-packages are discovered across all execution environments
 user_site = site.getusersitepackages()
@@ -31,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QSplitter,
     QLabel,
     QLineEdit,
@@ -52,6 +52,9 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QGroupBox,
     QScrollArea,
+    QDialog,
+    QFormLayout,
+    QFileDialog,
 )
 
 from agents.qwen_controller import QwenTrafficController
@@ -144,7 +147,13 @@ class OrchestrationWorker(QThread):
         chatgpt_lib_url: str = "",
         gemini_url: str = "",
         grok_url: str = "",
+        claude_url: str = "",
+        copilot_url: str = "",
         max_iterations: int = 1,
+        plan_agent1: str = "ChatGPT",
+        plan_agent2: str = "Gemini",
+        plan_agent3: str = "NotebookLM",
+        plan_agent4: str = "ChatGPT",
         is_plan_mode: bool = False,
         auto_freeze: bool = True,
         fresh_session: bool = False,
@@ -165,7 +174,13 @@ class OrchestrationWorker(QThread):
         self.chatgpt_lib_url = chatgpt_lib_url
         self.gemini_url = gemini_url
         self.grok_url = grok_url
+        self.claude_url = claude_url
+        self.copilot_url = copilot_url
         self.max_iterations = max_iterations
+        self.plan_agent1 = plan_agent1
+        self.plan_agent2 = plan_agent2
+        self.plan_agent3 = plan_agent3
+        self.plan_agent4 = plan_agent4
         self.is_plan_mode = is_plan_mode
 
         self.auto_freeze = auto_freeze
@@ -176,9 +191,27 @@ class OrchestrationWorker(QThread):
         self.automator: Optional[BrowserAutomator] = None
         self.repo_manager: Optional[WorkspaceRepoManager] = None
 
-
-
-
+    async def _query_agent(self, agent_name: str, prompt: str, target_doc_name: str = "") -> str:
+        """Query any selected agent (ChatGPT, NotebookLM, Gemini, Grok, Claude, Copilot) with the given prompt."""
+        agent = (agent_name or "chatgpt").lower().strip()
+        if agent == "gemini":
+            gemini_url = self.gemini_url or self.config.get("services", {}).get("gemini", {}).get("url", self.automator.gemini_url)
+            return await self.automator.query_gemini(prompt, new_chat=False, gemini_url=gemini_url)
+        elif agent == "notebooklm":
+            notebook_url = self.config.get("services", {}).get("notebooklm", {}).get("url", self.automator.notebooklm_url)
+            return await self.automator.query_notebooklm(prompt=prompt, notebook_url=notebook_url)
+        elif agent == "grok":
+            grok_url = self.grok_url or self.config.get("services", {}).get("grok", {}).get("url", self.automator.grok_url)
+            return await self.automator.query_grok(prompt, new_chat=False, grok_url=grok_url)
+        elif agent == "claude":
+            claude_url = self.claude_url or self.config.get("services", {}).get("claude", {}).get("url", self.automator.claude_url)
+            return await self.automator.query_claude(prompt, new_chat=False, claude_url=claude_url)
+        elif agent == "copilot":
+            copilot_url = self.copilot_url or self.config.get("services", {}).get("copilot", {}).get("url", self.automator.copilot_url)
+            return await self.automator.query_copilot(prompt, new_chat=False, copilot_url=copilot_url)
+        else:  # default to chatgpt
+            chatgpt_url = self.chatgpt_url or self.config.get("services", {}).get("chatgpt", {}).get("url", self.automator.chatgpt_url)
+            return await self.automator.query_chatgpt(prompt, new_chat=False, chatgpt_url=chatgpt_url)
 
     def cancel(self):
         self.is_cancelled = True
@@ -319,44 +352,59 @@ class OrchestrationWorker(QThread):
                     "info",
                 )
 
-                # STEP 0a: Update selected F-document in NotebookLM sources with version suffix
-                notebook_url = self.config.get("services", {}).get("notebooklm", {}).get("url", self.automator.notebooklm_url)
+                # Collect only the unique agents selected across all 4 prompt boxes
+                active_agents = {
+                    (self.plan_agent1 or "").strip().lower(),
+                    (self.plan_agent2 or "").strip().lower(),
+                    (self.plan_agent3 or "").strip().lower(),
+                    (self.plan_agent4 or "").strip().lower(),
+                }
+                active_names = ", ".join(sorted([a.title() for a in active_agents if a]))
                 self.log_signal.emit(
-                    f"Step 0a: Updating NotebookLM sources with '{versioned_doc_filename}'...",
+                    f"Active pipeline agents for document synchronization: {active_names}",
                     "info",
                 )
-                self.status_signal.emit(f"Uploading {versioned_doc_filename} to NotebookLM...")
-                self.progress_signal.emit(5)
 
                 temp_source_file = os.path.join(self.repo_manager.workspace_dir, versioned_doc_filename)
                 with open(temp_source_file, "w", encoding="utf-8", errors="replace") as f:
                     f.write(current_doc)
 
-                upload_ok = await self.automator.upload_source_to_notebooklm(
-                    notebook_url=notebook_url,
-                    file_path=temp_source_file,
-                    doc_title=versioned_doc_filename,
-                )
-                if upload_ok:
+                # STEP 0a: Update selected F-document in NotebookLM sources (ONLY if NotebookLM is selected)
+                if "notebooklm" in active_agents:
+                    notebook_url = self.config.get("services", {}).get("notebooklm", {}).get("url", self.automator.notebooklm_url)
                     self.log_signal.emit(
-                        f"NotebookLM updated successfully with '{versioned_doc_filename}'.",
-                        "success",
-                    )
-                else:
-                    self.log_signal.emit(
-                        f"Notice: NotebookLM source upload step completed for '{versioned_doc_filename}'.",
+                        f"Step 0a: Updating NotebookLM sources with '{versioned_doc_filename}'...",
                         "info",
                     )
+                    self.status_signal.emit(f"Uploading {versioned_doc_filename} to NotebookLM...")
+                    self.progress_signal.emit(5)
 
-                # STEP 0b: Update selected F-document in ChatGPT Library/Project folder (if configured)
+                    upload_ok = await self.automator.upload_source_to_notebooklm(
+                        notebook_url=notebook_url,
+                        file_path=temp_source_file,
+                        doc_title=versioned_doc_filename,
+                    )
+                    if upload_ok:
+                        self.log_signal.emit(
+                            f"NotebookLM updated successfully with '{versioned_doc_filename}'.",
+                            "success",
+                        )
+                    else:
+                        self.log_signal.emit(
+                            f"Notice: NotebookLM source upload step completed for '{versioned_doc_filename}'.",
+                            "info",
+                        )
+
+                # STEP 0b: Update selected F-document in ChatGPT Library/Project folder (ONLY if ChatGPT is selected)
                 gpt_lib_url = (self.chatgpt_lib_url or self.config.get("services", {}).get("chatgpt", {}).get("library_url", "")).strip()
-                if gpt_lib_url:
+                if "chatgpt" in active_agents and gpt_lib_url:
                     self.log_signal.emit(
                         f"Step 0b: Updating ChatGPT library folder ({gpt_lib_url}) with '{versioned_doc_filename}'...",
                         "info",
                     )
                     self.status_signal.emit(f"Uploading {versioned_doc_filename} to ChatGPT Library...")
                     self.progress_signal.emit(8)
+
                     gpt_lib_ok = await self.automator.upload_source_to_chatgpt_library(
                         library_url=gpt_lib_url,
                         file_path=temp_source_file,
@@ -373,6 +421,32 @@ class OrchestrationWorker(QThread):
                             "info",
                         )
 
+                # STEP 0c: Update selected F-document in Grok Project files (ONLY if Grok is selected)
+                grok_proj_url = (self.grok_url or self.config.get("services", {}).get("grok", {}).get("url", "")).strip()
+                if "grok" in active_agents and grok_proj_url and "project" in grok_proj_url:
+                    self.log_signal.emit(
+                        f"Step 0c: Updating Grok Project ({grok_proj_url}) with '{versioned_doc_filename}'...",
+                        "info",
+                    )
+                    self.status_signal.emit(f"Uploading {versioned_doc_filename} to Grok Project...")
+                    self.progress_signal.emit(9)
+
+                    grok_proj_ok = await self.automator.upload_source_to_grok_project(
+                        project_url=grok_proj_url,
+                        file_path=temp_source_file,
+                        doc_title=versioned_doc_filename,
+                    )
+                    if grok_proj_ok:
+                        self.log_signal.emit(
+                            f"Grok Project updated successfully with '{versioned_doc_filename}'.",
+                            "success",
+                        )
+                    else:
+                        self.log_signal.emit(
+                            f"Notice: Grok Project update step completed for '{versioned_doc_filename}'.",
+                            "info",
+                        )
+
                 self.progress_signal.emit(10)
 
 
@@ -383,72 +457,67 @@ class OrchestrationWorker(QThread):
                         break
 
                     self.log_signal.emit(
-                        f"=== Iteration {iter_idx}/{self.max_iterations}: Dual Review (Gemini & NotebookLM) ===",
+                        f"=== Iteration {iter_idx}/{self.max_iterations}: Dual Review ({self.plan_agent2} & {self.plan_agent3}) ===",
                         "info",
                     )
 
-                    # 1. Gemini Review
-                    self.status_signal.emit(f"[Iter {iter_idx}/{self.max_iterations}] Querying Gemini for critique...")
+                    # 1. Reviewer 1 (self.plan_agent2)
+                    self.status_signal.emit(f"[Iter {iter_idx}/{self.max_iterations}] Querying {self.plan_agent2} for critique...")
                     self.progress_signal.emit(int(10 + (iter_idx - 1) * 80 / self.max_iterations + 10 / self.max_iterations))
-                    gemini_instruction = (
+                    agent2_instruction = (
                         self.prompt_gemini.strip()
                         if (self.prompt_gemini and len(self.prompt_gemini.strip()) > 0)
                         else self.stage2_prompt.strip()
                     )
-                    gemini_prompt = f"{gemini_instruction}\n\nDocument Under Review: {target_doc_name}"
-                    self.log_signal.emit(f"[Iter {iter_idx}] Sending prompt + '{target_doc_name}' to Gemini...", "info")
-                    gemini_critique = await self.automator.query_gemini(
-                        gemini_prompt, new_chat=False, gemini_url=self.gemini_url
-                    )
+                    agent2_prompt = f"{agent2_instruction}\n\nDocument Under Review: {target_doc_name}"
+                    self.log_signal.emit(f"[Iter {iter_idx}] Sending prompt + '{target_doc_name}' to {self.plan_agent2}...", "info")
+                    agent2_critique = await self._query_agent(self.plan_agent2, agent2_prompt, target_doc_name)
 
-                    gemini_filename = f"{prefix}-iter{iter_idx}-gemini-critique.md"
+                    agent2_filename = f"{prefix}-iter{iter_idx}-{self.plan_agent2.lower()}-critique.md"
                     self.repo_manager.save_named_file(
-                        filename=gemini_filename,
-                        content=gemini_critique,
-                        commit_message=f"docs(gemini): iteration {iter_idx}/{self.max_iterations} review -> {gemini_filename}",
+                        filename=agent2_filename,
+                        content=agent2_critique,
+                        commit_message=f"docs({self.plan_agent2.lower()}): iteration {iter_idx}/{self.max_iterations} review -> {agent2_filename}",
                     )
-                    self.log_signal.emit(f"[Iter {iter_idx}] Gemini critique received ({len(gemini_critique)} chars).", "success")
+                    self.log_signal.emit(f"[Iter {iter_idx}] {self.plan_agent2} critique received ({len(agent2_critique)} chars).", "success")
 
-                    # 2. NotebookLM Review (Direct chat query with prompt + document filename)
-                    self.status_signal.emit(f"[Iter {iter_idx}/{self.max_iterations}] Querying NotebookLM for cross-document evaluation...")
+                    # 2. Reviewer 2 (self.plan_agent3)
+                    self.status_signal.emit(f"[Iter {iter_idx}/{self.max_iterations}] Querying {self.plan_agent3} for cross-document evaluation...")
                     self.progress_signal.emit(int(10 + (iter_idx - 1) * 80 / self.max_iterations + 35 / self.max_iterations))
-                    nb_instruction = self.stage2_prompt.strip()
-                    nb_prompt = f"{nb_instruction}\n\nDocument Under Review: {target_doc_name}"
+                    agent3_instruction = self.stage2_prompt.strip()
+                    agent3_prompt = f"{agent3_instruction}\n\nDocument Under Review: {target_doc_name}"
 
-                    notebook_url = self.config.get("services", {}).get("notebooklm", {}).get("url", self.automator.notebooklm_url)
-                    self.log_signal.emit(f"[Iter {iter_idx}] Sending prompt + '{target_doc_name}' to NotebookLM ({notebook_url})...", "info")
-                    notebooklm_critique = await self.automator.query_notebooklm(
-                        prompt=nb_prompt,
-                        notebook_url=notebook_url,
-                    )
-                    nb_filename = f"{prefix}-iter{iter_idx}-notebooklm-critique.md"
+                    self.log_signal.emit(f"[Iter {iter_idx}] Sending prompt + '{target_doc_name}' to {self.plan_agent3}...", "info")
+                    agent3_critique = await self._query_agent(self.plan_agent3, agent3_prompt, target_doc_name)
+
+                    agent3_filename = f"{prefix}-iter{iter_idx}-{self.plan_agent3.lower()}-critique.md"
                     self.repo_manager.save_named_file(
-                        filename=nb_filename,
-                        content=notebooklm_critique,
-                        commit_message=f"docs(notebooklm): iteration {iter_idx}/{self.max_iterations} evaluation -> {nb_filename}",
+                        filename=agent3_filename,
+                        content=agent3_critique,
+                        commit_message=f"docs({self.plan_agent3.lower()}): iteration {iter_idx}/{self.max_iterations} evaluation -> {agent3_filename}",
                     )
-                    self.log_signal.emit(f"[Iter {iter_idx}] NotebookLM evaluation received ({len(notebooklm_critique)} chars).", "success")
+                    self.log_signal.emit(f"[Iter {iter_idx}] {self.plan_agent3} evaluation received ({len(agent3_critique)} chars).", "success")
 
                     # GATE 1 ➔ 2: Validate Phase 1 outputs
-                    PhaseGatekeeper.validate_phase_1_outputs(gemini_critique, notebooklm_critique, self.log_signal)
+                    PhaseGatekeeper.validate_phase_1_outputs(agent2_critique, agent3_critique, self.log_signal)
 
                     # Emit combined dual critique to GUI
                     combined_critique = (
                         f"# Dual Critic Evaluation — Iteration {iter_idx}/{self.max_iterations}\n\n"
                         f"## Target Document: {target_doc_name}\n\n"
-                        f"## 1. Gemini Review Critique\n{gemini_critique}\n\n"
+                        f"## 1. {self.plan_agent2} Review Critique\n{agent2_critique}\n\n"
                         f"---\n\n"
-                        f"## 2. NotebookLM Cross-Document Evaluation\n{notebooklm_critique}"
+                        f"## 2. {self.plan_agent3} Cross-Document Evaluation\n{agent3_critique}"
                     )
                     self.critique_updated_signal.emit(combined_critique)
 
                     if self.is_cancelled:
                         break
 
-                    # 3. ChatGPT Aggregator & Refiner
-                    self.status_signal.emit(f"[Iter {iter_idx}/{self.max_iterations}] ChatGPT Aggregator synthesizing & refining plan...")
+                    # 3. Aggregator & Refiner (self.plan_agent4)
+                    self.status_signal.emit(f"[Iter {iter_idx}/{self.max_iterations}] {self.plan_agent4} Aggregator synthesizing & refining plan...")
                     self.progress_signal.emit(int(10 + (iter_idx - 1) * 80 / self.max_iterations + 70 / self.max_iterations))
-                    user_chatgpt_instruction = (
+                    user_aggregator_instruction = (
                         self.stage3_prompt.strip()
                         if (self.stage3_prompt and len(self.stage3_prompt.strip()) > 0)
                         else (self.stage1_prompt.strip() if self.stage1_prompt else "collect import point from this reply of my friends and what suit for this enhancement. and importantly dont miss old points. you neeed to aggregate this as per doc, then will share it with my friend until it get finized")
@@ -464,18 +533,18 @@ class OrchestrationWorker(QThread):
                         target_next_version = f"v{iter_idx + 1}.0.0"
 
                     # Put exact User Prompt from App at the VERY TOP / FIRST
-                    aggregator_prompt = f"""{user_chatgpt_instruction}
+                    aggregator_prompt = f"""{user_aggregator_instruction}
 
 Document Under Review: {target_doc_name}
 
-### 1. Gemini Review Critique (Iteration {iter_idx}/{self.max_iterations}):
+### 1. {self.plan_agent2} Review Critique (Iteration {iter_idx}/{self.max_iterations}):
 ---
-{gemini_critique}
+{agent2_critique}
 ---
 
-### 2. NotebookLM Cross-Document Evaluation Critique (Iteration {iter_idx}/{self.max_iterations}):
+### 2. {self.plan_agent3} Cross-Document Evaluation Critique (Iteration {iter_idx}/{self.max_iterations}):
 ---
-{notebooklm_critique}
+{agent3_critique}
 ---
 
 ### Baseline Document ({baseline_version}):
@@ -485,12 +554,9 @@ Document Under Review: {target_doc_name}
 
 Please produce the complete revised and refined implementation plan version {target_next_version} incorporating all valid points."""
 
-                    self.log_signal.emit(f"[Iter {iter_idx}] ChatGPT Aggregator synthesizing dual feedback for '{target_doc_name}' ({target_next_version})...", "info")
+                    self.log_signal.emit(f"[Iter {iter_idx}] {self.plan_agent4} Aggregator synthesizing dual feedback for '{target_doc_name}' ({target_next_version})...", "info")
 
-                    refined_output = await self.automator.query_chatgpt(
-                        aggregator_prompt, new_chat=False, chatgpt_url=self.chatgpt_url
-                    )
-
+                    refined_output = await self._query_agent(self.plan_agent4, aggregator_prompt, target_doc_name)
 
                     # GATE 2 ➔ 3: Validate Phase 2 consolidated output
                     PhaseGatekeeper.validate_phase_2_output(refined_output, target_next_version, self.log_signal)
@@ -498,14 +564,14 @@ Please produce the complete revised and refined implementation plan version {tar
                     if refined_output and len(refined_output.strip()) > 10:
                         current_doc = refined_output
                         iter_out_name = (
-                            f"{prefix}-final-done-by-chatgpt.md"
+                            f"{prefix}-final-done-by-{self.plan_agent4.lower()}.md"
                             if iter_idx == self.max_iterations
-                            else f"{prefix}-iter{iter_idx}-chatgpt-refined.md"
+                            else f"{prefix}-iter{iter_idx}-{self.plan_agent4.lower()}-refined.md"
                         )
                         saved_path = self.repo_manager.save_named_file(
                             filename=iter_out_name,
                             content=current_doc,
-                            commit_message=f"docs(chatgpt): iteration {iter_idx}/{self.max_iterations} refined plan -> {iter_out_name}",
+                            commit_message=f"docs({self.plan_agent4.lower()}): iteration {iter_idx}/{self.max_iterations} refined plan -> {iter_out_name}",
                         )
                         self.doc_updated_signal.emit(iter_out_name, current_doc)
                         self.history_updated_signal.emit(self.repo_manager.get_commit_history())
@@ -514,12 +580,11 @@ Please produce the complete revised and refined implementation plan version {tar
                             "success",
                         )
 
-
                 self.progress_signal.emit(100)
                 self.status_signal.emit("Ready")
                 self.finished_signal.emit(
                     True,
-                    f"Tri-Model Plan Refinement completed successfully across {self.max_iterations} iterations.",
+                    f"Multi-Model Plan Refinement completed successfully across {self.max_iterations} iterations.",
                 )
                 return
 
@@ -739,6 +804,296 @@ Please produce the complete revised and refined implementation plan version {tar
                 await self.automator.stop()
 
 
+class AgentTestWorker(QThread):
+    status_signal = Signal(str)
+    result_signal = Signal(bool, str)
+
+    def __init__(self, service_key: str, target_url: str, config: dict):
+        super().__init__()
+        self.service_key = service_key
+        self.target_url = target_url
+        self.config = config
+
+    def run(self):
+        asyncio.run(self._execute_test())
+
+    async def _execute_test(self):
+        automator = BrowserAutomator(config=self.config)
+        try:
+            self.status_signal.emit("Connecting to browser...")
+            await automator.start()
+            t0 = time.time()
+
+            if self.service_key == "chatgpt":
+                self.status_signal.emit("Sending test prompt to ChatGPT...")
+                res = await automator.query_chatgpt(
+                    "Verification test: reply with 'OK' and confirm connection.",
+                    chatgpt_url=self.target_url
+                )
+                dur = round(time.time() - t0, 1)
+                if res and len(res.strip()) > 0:
+                    preview = res.strip().replace("\n", " ")[:60]
+                    self.result_signal.emit(True, f"ChatGPT Verified ({dur}s): \"{preview}\"")
+                else:
+                    self.result_signal.emit(False, "ChatGPT returned empty response.")
+
+            elif self.service_key == "chatgpt_lib":
+                self.status_signal.emit("Testing ChatGPT Library upload & cleanup...")
+                workspace_dir = self.config.get("workspace", {}).get("dir", "./workspace")
+                os.makedirs(workspace_dir, exist_ok=True)
+                test_file = os.path.join(workspace_dir, "F-TEST-CHATGPT_LIB_SYNC_v1.0.md")
+                with open(test_file, "w", encoding="utf-8") as f:
+                    f.write("# ChatGPT Library Sync Test\n\nVerification file for library upload.")
+
+                upload_ok = await automator.upload_source_to_chatgpt_library(
+                    library_url=self.target_url,
+                    file_path=test_file,
+                    doc_title=os.path.basename(test_file),
+                )
+                dur = round(time.time() - t0, 1)
+                if upload_ok:
+                    self.result_signal.emit(True, f"ChatGPT Library Sync Verified ({dur}s).")
+                else:
+                    self.result_signal.emit(False, "ChatGPT Library upload failed or timed out.")
+
+            elif self.service_key == "notebooklm":
+                self.status_signal.emit("Testing NotebookLM sources upload & chat query...")
+                workspace_dir = self.config.get("workspace", {}).get("dir", "./workspace")
+                os.makedirs(workspace_dir, exist_ok=True)
+                test_file = os.path.join(workspace_dir, "F-TEST-NOTEBOOKLM_SYNC_v1.0.md")
+                with open(test_file, "w", encoding="utf-8") as f:
+                    f.write("# NotebookLM Sync Test\n\nVerification document for source preparation.")
+
+                upload_ok = await automator.upload_source_to_notebooklm(
+                    notebook_url=self.target_url,
+                    file_path=test_file,
+                    doc_title=os.path.basename(test_file),
+                )
+                self.status_signal.emit("Querying NotebookLM chat...")
+                query_res = await automator.query_notebooklm(
+                    prompt="Verification test: reply with 'OK'.",
+                    notebook_url=self.target_url
+                )
+                dur = round(time.time() - t0, 1)
+                if query_res and len(query_res.strip()) > 0:
+                    preview = query_res.strip().replace("\n", " ")[:60]
+                    self.result_signal.emit(True, f"NotebookLM Verified ({dur}s): sources sync & chat response: \"{preview}\"")
+                elif upload_ok:
+                    self.result_signal.emit(True, f"NotebookLM Sources Upload Verified ({dur}s).")
+                else:
+                    self.result_signal.emit(False, "NotebookLM sync/query failed or timed out.")
+
+            elif self.service_key == "gemini":
+                self.status_signal.emit("Sending test prompt to Gemini...")
+                res = await automator.query_gemini(
+                    "Verification test: reply with 'OK' and confirm connection.",
+                    gemini_url=self.target_url
+                )
+                dur = round(time.time() - t0, 1)
+                if res and len(res.strip()) > 0:
+                    preview = res.strip().replace("\n", " ")[:60]
+                    self.result_signal.emit(True, f"Gemini Verified ({dur}s): \"{preview}\"")
+                else:
+                    self.result_signal.emit(False, "Gemini returned empty response.")
+
+            elif self.service_key == "grok":
+                self.status_signal.emit("Testing Grok Project files sync & query...")
+                workspace_dir = self.config.get("workspace", {}).get("dir", "./workspace")
+                os.makedirs(workspace_dir, exist_ok=True)
+                test_file = os.path.join(workspace_dir, "F-TEST-GROK_SYNC_v1.0.md")
+                with open(test_file, "w", encoding="utf-8") as f:
+                    f.write("# Grok Sync Test\n\nVerification document for project file management.")
+
+                doc_name = os.path.basename(test_file)
+                upload_ok = await automator.upload_source_to_grok_project(
+                    project_url=self.target_url,
+                    file_path=test_file,
+                    doc_title=doc_name,
+                )
+                self.status_signal.emit("Querying Grok prompt...")
+                query_res = await automator.query_grok(
+                    prompt="Verification test: reply with 'OK' and confirm connection.",
+                    grok_url=self.target_url
+                )
+                await automator.delete_file_from_grok_project(self.target_url, doc_name)
+                dur = round(time.time() - t0, 1)
+                if query_res and len(query_res.strip()) > 0:
+                    preview = query_res.strip().replace("\n", " ")[:60]
+                    self.result_signal.emit(True, f"Grok Verified ({dur}s): project files upload/delete & response: \"{preview}\"")
+                elif upload_ok:
+                    self.result_signal.emit(True, f"Grok Project File Sync Verified ({dur}s).")
+                else:
+                    self.result_signal.emit(False, "Grok project test failed or timed out.")
+
+            elif self.service_key == "claude":
+                self.status_signal.emit("Sending test prompt to Claude...")
+                res = await automator.query_claude(
+                    "Verification test: reply with 'OK' and confirm connection.",
+                    claude_url=self.target_url
+                )
+                dur = round(time.time() - t0, 1)
+                if res and len(res.strip()) > 0:
+                    preview = res.strip().replace("\n", " ")[:60]
+                    self.result_signal.emit(True, f"Claude Verified ({dur}s): \"{preview}\"")
+                else:
+                    self.result_signal.emit(False, "Claude returned empty response.")
+
+            elif self.service_key == "copilot":
+                self.status_signal.emit("Sending test prompt to Copilot...")
+                res = await automator.query_copilot(
+                    "Verification test: reply with 'OK' and confirm connection.",
+                    copilot_url=self.target_url
+                )
+                dur = round(time.time() - t0, 1)
+                if res and len(res.strip()) > 0:
+                    preview = res.strip().replace("\n", " ")[:60]
+                    self.result_signal.emit(True, f"Copilot Verified ({dur}s): \"{preview}\"")
+                else:
+                    self.result_signal.emit(False, "Copilot returned empty response.")
+            else:
+                self.result_signal.emit(False, f"Unknown service key: {self.service_key}")
+        except Exception as e:
+            self.result_signal.emit(False, f"Test error: {str(e)}")
+        finally:
+            await automator.stop()
+
+
+class BroadcastWorker(QThread):
+    """
+    Asynchronously broadcasts a prompt to all selected AI agents, collects structured replies with headers,
+    and saves the combined markdown to the workspace.
+    """
+    status_signal = Signal(str)
+    progress_signal = Signal(int)
+    log_signal = Signal(str, str)
+    agent_response_signal = Signal(str, str)  # (agent_name, response_text)
+    finished_signal = Signal(bool, str, str)  # (success, combined_markdown, saved_file_path)
+
+    def __init__(self, prompt: str, selected_agents: List[str], config: dict, user_prompt: str = "", doc_name: str = ""):
+        super().__init__()
+        self.prompt = prompt
+        self.user_prompt = user_prompt or prompt
+        self.doc_name = doc_name
+        self.selected_agents = selected_agents
+        self.config = config
+        self.is_cancelled = False
+        self.automator: Optional[BrowserAutomator] = None
+
+    def cancel(self):
+        self.is_cancelled = True
+
+    def run(self):
+        asyncio.run(self._execute_broadcast())
+
+    async def _execute_broadcast(self):
+        try:
+            self.automator = BrowserAutomator(config=self.config)
+            self.status_signal.emit("Connecting to browser for Multi-Agent Broadcast...")
+            self.log_signal.emit("Initializing browser session for Multi-Agent Broadcast...", "info")
+            self.progress_signal.emit(5)
+            await self.automator.start()
+
+            results: Dict[str, str] = {}
+            total = len(self.selected_agents)
+            if total == 0:
+                self.finished_signal.emit(False, "No agents selected for broadcast.", "")
+                return
+
+            step_pct = 85.0 / total
+
+            # Initialize Aggregated Markdown Document on disk immediately
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+            workspace_dir = self.config.get("workspace", {}).get("dir", "./workspace")
+            os.makedirs(workspace_dir, exist_ok=True)
+            saved_filename = f"BROADCAST_RESPONSES_{timestamp_tag}.md"
+            saved_filepath = os.path.join(workspace_dir, saved_filename)
+
+            doc_line = f"**Attached Document:** `{self.doc_name}`  \n" if (self.doc_name and self.doc_name != "None") else ""
+            header_text = (
+                f"# Multi-Agent Broadcast Responses\n"
+                f"**Timestamp:** {now_str}  \n"
+                f"**Target Agents:** {', '.join(self.selected_agents)}  \n"
+                f"{doc_line}"
+                f"## 📝 Broadcast Prompt\n"
+                f"> {self.user_prompt.strip()}\n\n"
+                f"---\n\n"
+            )
+            with open(saved_filepath, "w", encoding="utf-8") as f:
+                f.write(header_text)
+            self.log_signal.emit(f"Created broadcast responses file: {saved_filename}", "info")
+
+            for i, agent in enumerate(self.selected_agents):
+                if self.is_cancelled:
+                    self.log_signal.emit("Multi-Agent Broadcast cancelled by user.", "warning")
+                    break
+
+                self.status_signal.emit(f"Querying {agent} ({i+1}/{total})...")
+                self.log_signal.emit(f"[{agent}] Sending broadcast prompt...", "info")
+                t0 = time.time()
+
+                reply = ""
+                try:
+                    agent_lower = agent.lower()
+                    if agent_lower == "chatgpt":
+                        chatgpt_url = self.config.get("services", {}).get("chatgpt", {}).get("url", self.automator.chatgpt_url)
+                        reply = await self.automator.query_chatgpt(self.prompt, new_chat=False, chatgpt_url=chatgpt_url)
+                    elif agent_lower == "notebooklm":
+                        notebook_url = self.config.get("services", {}).get("notebooklm", {}).get("url", self.automator.notebooklm_url)
+                        reply = await self.automator.query_notebooklm(prompt=self.prompt, notebook_url=notebook_url)
+                    elif agent_lower == "gemini":
+                        gemini_url = self.config.get("services", {}).get("gemini", {}).get("url", self.automator.gemini_url)
+                        reply = await self.automator.query_gemini(self.prompt, new_chat=False, gemini_url=gemini_url)
+                    elif agent_lower == "grok":
+                        grok_url = self.config.get("services", {}).get("grok", {}).get("url", self.automator.grok_url)
+                        reply = await self.automator.query_grok(self.prompt, new_chat=False, grok_url=grok_url)
+                    elif agent_lower == "claude":
+                        claude_url = self.config.get("services", {}).get("claude", {}).get("url", self.automator.claude_url)
+                        reply = await self.automator.query_claude(self.prompt, new_chat=False, claude_url=claude_url)
+                    elif agent_lower == "copilot":
+                        copilot_url = self.config.get("services", {}).get("copilot", {}).get("url", self.automator.copilot_url)
+                        reply = await self.automator.query_copilot(self.prompt, new_chat=False, copilot_url=copilot_url)
+                    else:
+                        reply = f"Unknown agent: {agent}"
+                except Exception as e_agent:
+                    reply = f"Error querying {agent}: {str(e_agent)}"
+                    self.log_signal.emit(f"[{agent} Error] {e_agent}", "error")
+
+                dur = round(time.time() - t0, 1)
+                results[agent] = reply
+
+                # Incremental append of agent response to markdown file on disk immediately
+                agent_chunk = f"# 🤖 {agent} Response\n\n{reply.strip()}\n\n---\n\n"
+                try:
+                    with open(saved_filepath, "a", encoding="utf-8") as f:
+                        f.write(agent_chunk)
+                except Exception as e_write:
+                    self.log_signal.emit(f"Error appending {agent} response to file: {e_write}", "warning")
+
+                # Live signal emission so UI shows the response immediately without waiting
+                self.agent_response_signal.emit(agent, reply)
+                self.log_signal.emit(f"[{agent}] Received response in {dur}s ({len(reply)} chars) and appended to {saved_filename}.", "success")
+                self.progress_signal.emit(int(10 + (i + 1) * step_pct))
+
+            # Read the complete incremental markdown from disk
+            full_markdown = ""
+            if os.path.exists(saved_filepath):
+                with open(saved_filepath, "r", encoding="utf-8") as f:
+                    full_markdown = f.read()
+
+            self.log_signal.emit(f"Broadcast responses successfully saved to: {saved_filename}", "success")
+            self.progress_signal.emit(100)
+            self.status_signal.emit("Multi-Agent Broadcast completed successfully.")
+            self.finished_signal.emit(True, full_markdown, saved_filepath)
+
+        except Exception as e:
+            self.log_signal.emit(f"Broadcast execution error: {e}", "error")
+            self.finished_signal.emit(False, f"Error: {str(e)}", "")
+        finally:
+            if self.automator:
+                await self.automator.stop()
+
+
 class MainWindow(QMainWindow):
     """
     Main Application Window with Stage 1 (ChatGPT) and Stage 2 (NotebookLM) Prompt Customization.
@@ -814,6 +1169,16 @@ class MainWindow(QMainWindow):
         if hasattr(self, "txt_plan_chatgpt_final_prompt"):
             self.config.setdefault("prompts", {})["plan_chatgpt_final_prompt"] = self.txt_plan_chatgpt_final_prompt.toPlainText()
 
+        # Implementation Plan Selected Agents
+        if hasattr(self, "combo_plan_agent1"):
+            self.config.setdefault("agents", {})["plan_agent1"] = self.combo_plan_agent1.currentText()
+        if hasattr(self, "combo_plan_agent2"):
+            self.config.setdefault("agents", {})["plan_agent2"] = self.combo_plan_agent2.currentText()
+        if hasattr(self, "combo_plan_agent3"):
+            self.config.setdefault("agents", {})["plan_agent3"] = self.combo_plan_agent3.currentText()
+        if hasattr(self, "combo_plan_agent4"):
+            self.config.setdefault("agents", {})["plan_agent4"] = self.combo_plan_agent4.currentText()
+
         if hasattr(self, "txt_concept"):
             self.config.setdefault("prompts", {})["custom_concept"] = self.txt_concept.toPlainText()
         if hasattr(self, "txt_chatgpt_url"):
@@ -827,6 +1192,25 @@ class MainWindow(QMainWindow):
             self.config.setdefault("services", {}).setdefault("gemini", {})["url"] = self.txt_gemini_url.text().strip()
         if hasattr(self, "txt_grok_url"):
             self.config.setdefault("services", {}).setdefault("grok", {})["url"] = self.txt_grok_url.text().strip()
+        if hasattr(self, "txt_claude_url"):
+            self.config.setdefault("services", {}).setdefault("claude", {})["url"] = self.txt_claude_url.text().strip()
+        if hasattr(self, "txt_copilot_url"):
+            self.config.setdefault("services", {}).setdefault("copilot", {})["url"] = self.txt_copilot_url.text().strip()
+
+        # Multi-Agent Broadcast Prompts & Checkboxes
+        if hasattr(self, "txt_broadcast_prompt"):
+            self.config.setdefault("prompts", {})["broadcast_prompt"] = self.txt_broadcast_prompt.toPlainText()
+        if hasattr(self, "chk_agent_chatgpt"):
+            b_agents = self.config.setdefault("broadcast_agents", {})
+            b_agents["chatgpt"] = self.chk_agent_chatgpt.isChecked()
+            b_agents["notebooklm"] = self.chk_agent_notebooklm.isChecked()
+            b_agents["gemini"] = self.chk_agent_gemini.isChecked()
+            b_agents["grok"] = self.chk_agent_grok.isChecked()
+            b_agents["claude"] = self.chk_agent_claude.isChecked()
+            b_agents["copilot"] = self.chk_agent_copilot.isChecked()
+        if hasattr(self, "chk_attach_doc_content"):
+            self.config.setdefault("broadcast", {})["attach_doc"] = self.chk_attach_doc_content.isChecked()
+
         if hasattr(self, "combo_iterations"):
             self.config.setdefault("orchestration", {})["plan_iterations"] = self.combo_iterations.currentIndex() + 1
 
@@ -837,8 +1221,28 @@ class MainWindow(QMainWindow):
             self.config.setdefault("ui", {})["selected_doc"] = self.list_docs.currentItem().data(Qt.UserRole)
         if hasattr(self, "list_plan_docs") and self.list_plan_docs.currentItem():
             self.config.setdefault("ui", {})["selected_plan_doc"] = self.list_plan_docs.currentItem().data(Qt.UserRole)
+        if hasattr(self, "list_broadcast_docs") and self.list_broadcast_docs.currentItem():
+            self.config.setdefault("ui", {})["selected_broadcast_doc"] = self.list_broadcast_docs.currentItem().data(Qt.UserRole)
 
         self._save_config()
+
+    def _on_agent_selection_changed(self):
+        """Handle agent dropdown changes in Tab 3."""
+        self._update_flow_info_label()
+        self._auto_save_prompts()
+
+    def _update_flow_info_label(self):
+        """Dynamically update the flow overview label to reflect currently selected agents."""
+        if not hasattr(self, "lbl_flow_info") or not hasattr(self, "combo_plan_agent1"):
+            return
+        a1 = self.combo_plan_agent1.currentText()
+        a2 = self.combo_plan_agent2.currentText()
+        a3 = self.combo_plan_agent3.currentText()
+        a4 = self.combo_plan_agent4.currentText()
+        iters = self.combo_iterations.currentIndex() + 1
+        self.lbl_flow_info.setText(
+            f"Multi-Model Flow: {a1} (Initial / Source) ➔ {a2} & {a3} (Dual Reviewers) ➔ {a4} (Refined Plan) [Loops across {iters} iteration{'s' if iters > 1 else ''}]"
+        )
 
 
 
@@ -973,6 +1377,26 @@ class MainWindow(QMainWindow):
             QSplitter::handle {
                 background-color: #21262d;
             }
+            QScrollBar:vertical {
+                border: none;
+                background: #161b22;
+                width: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #30363d;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #58a6ff;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar:horizontal {
+                height: 0px;
+            }
             """
         )
 
@@ -1012,8 +1436,19 @@ class MainWindow(QMainWindow):
 
         top_bar.addStretch()
 
-        self.btn_launch_chrome = QPushButton("Open Login Browser")
+        self.btn_urls = QPushButton("🌐 Target URLs")
+        self.btn_urls.setObjectName("btnSecondary")
+        self.btn_urls.setToolTip("View, configure, and test target URLs for ChatGPT, NotebookLM, Gemini, Grok, Claude, and Copilot")
+        self.btn_urls.clicked.connect(self._open_urls_dialog)
+        top_bar.addWidget(self.btn_urls)
 
+        self.btn_settings = QPushButton("⚙️ Settings")
+        self.btn_settings.setObjectName("btnSecondary")
+        self.btn_settings.setToolTip("Configure source documents directory and output workspace folder")
+        self.btn_settings.clicked.connect(self._open_settings_dialog)
+        top_bar.addWidget(self.btn_settings)
+
+        self.btn_launch_chrome = QPushButton("Open Login Browser")
         self.btn_launch_chrome.setObjectName("btnSecondary")
         self.btn_launch_chrome.clicked.connect(self._launch_chrome_debug_clicked)
         top_bar.addWidget(self.btn_launch_chrome)
@@ -1030,81 +1465,48 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(top_bar)
 
-        # -------------------------------------------------------------
-        # TARGET URLS CONFIGURATION BAR (ChatGPT & NotebookLM)
-        # -------------------------------------------------------------
-        urls_bar = QHBoxLayout()
-        urls_bar.setSpacing(12)
-
-        # ChatGPT Target URL
-        lbl_gpt = QLabel("ChatGPT URL:")
-        lbl_gpt.setStyleSheet("color: #10a37f; font-weight: bold;")
-        urls_bar.addWidget(lbl_gpt)
-
+        # Target URLs Data Holders (configured via 'Target URLs' dialog)
         default_gpt_url = self.config.get("services", {}).get("chatgpt", {}).get(
             "url", "https://chatgpt.com/c/6a918785-fca8-83ee-8bb6-422f629090d0"
         )
         self.txt_chatgpt_url = QLineEdit(default_gpt_url)
-        self.txt_chatgpt_url.setPlaceholderText("https://chatgpt.com/c/<conversation_id>")
         self.txt_chatgpt_url.textChanged.connect(self._auto_save_prompts)
-        urls_bar.addWidget(self.txt_chatgpt_url, 1)
-
-        # ChatGPT Library / Project URL
-        lbl_gpt_lib = QLabel("ChatGPT Lib:")
-        lbl_gpt_lib.setStyleSheet("color: #10a37f; font-weight: bold;")
-        urls_bar.addWidget(lbl_gpt_lib)
 
         default_gpt_lib_url = self.config.get("services", {}).get("chatgpt", {}).get(
             "library_url", "https://chatgpt.com/library/d/6a723b6fe06c819199240f5a593f7ab4"
         )
         self.txt_chatgpt_lib_url = QLineEdit(default_gpt_lib_url)
-        self.txt_chatgpt_lib_url.setPlaceholderText("https://chatgpt.com/library/d/<folder_id>")
         self.txt_chatgpt_lib_url.textChanged.connect(self._auto_save_prompts)
-        urls_bar.addWidget(self.txt_chatgpt_lib_url, 1)
-
-
-        # NotebookLM Target URL
-        lbl_nb = QLabel("NotebookLM Target URL:")
-        lbl_nb.setStyleSheet("color: #58a6ff; font-weight: bold;")
-        urls_bar.addWidget(lbl_nb)
 
         default_nb_url = self.config.get("services", {}).get("notebooklm", {}).get(
             "url", "https://notebook.google.com/notebook/b7a81a2b-5485-493a-bbfb-cbe58808dfc3"
         )
         self.txt_notebooklm_url = QLineEdit(default_nb_url)
-        self.txt_notebooklm_url.setPlaceholderText("https://notebook.google.com/notebook/<notebook_id>")
         self.txt_notebooklm_url.textChanged.connect(self._auto_save_prompts)
-        urls_bar.addWidget(self.txt_notebooklm_url, 1)
-
-        # Gemini Target URL
-        lbl_gemini = QLabel("Gemini Target URL:")
-        lbl_gemini.setStyleSheet("color: #a78bfa; font-weight: bold;")
-        urls_bar.addWidget(lbl_gemini)
 
         default_gemini_url = self.config.get("services", {}).get("gemini", {}).get(
             "url", "https://gemini.google.com/app"
         )
         self.txt_gemini_url = QLineEdit(default_gemini_url)
-        self.txt_gemini_url.setPlaceholderText("https://gemini.google.com/app")
         self.txt_gemini_url.textChanged.connect(self._auto_save_prompts)
-        urls_bar.addWidget(self.txt_gemini_url, 1)
-
-        # Grok Target URL
-        lbl_grok = QLabel("Grok Target URL:")
-        lbl_grok.setStyleSheet("color: #f59e0b; font-weight: bold;")
-        urls_bar.addWidget(lbl_grok)
 
         default_grok_url = self.config.get("services", {}).get("grok", {}).get(
             "url", "https://grok.com/project/3a4c5217-9801-44e6-bb35-60f7e17eca21"
         )
         self.txt_grok_url = QLineEdit(default_grok_url)
-        self.txt_grok_url.setPlaceholderText("https://grok.com/project/<project_id>")
         self.txt_grok_url.textChanged.connect(self._auto_save_prompts)
-        urls_bar.addWidget(self.txt_grok_url, 1)
 
-        main_layout.addLayout(urls_bar)
+        default_claude_url = self.config.get("services", {}).get("claude", {}).get(
+            "url", "https://claude.ai/chat/bccf1a06-ab09-483d-8681-1d6682d682f7"
+        )
+        self.txt_claude_url = QLineEdit(default_claude_url)
+        self.txt_claude_url.textChanged.connect(self._auto_save_prompts)
 
-
+        default_copilot_url = self.config.get("services", {}).get("copilot", {}).get(
+            "url", "https://copilot.microsoft.com/projects/WYSvbmQqZXZMk49sA4Dr5"
+        )
+        self.txt_copilot_url = QLineEdit(default_copilot_url)
+        self.txt_copilot_url.textChanged.connect(self._auto_save_prompts)
 
         # -------------------------------------------------------------
         # MAIN HORIZONTAL SPLITTER (Left: Inputs & Prompts, Right: Outputs)
@@ -1115,19 +1517,25 @@ class MainWindow(QMainWindow):
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QFrame.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 8, 0)
+        left_layout.setContentsMargins(0, 0, 8, 8)
+        left_layout.setSpacing(10)
+
         # Document / Concept Selection Tabs
         self.input_tabs = QTabWidget()
 
         # Tab 1: Doc Review Mode (AruMLStudio docs)
         tab_docs = QWidget()
-
         tab_docs_layout = QVBoxLayout(tab_docs)
+        tab_docs_layout.setContentsMargins(8, 8, 8, 8)
+        tab_docs_layout.setSpacing(8)
 
         lbl_filter = QLabel("Search Document Prefix (e.g. 00, 01, 08, F1, 15):")
+        lbl_filter.setWordWrap(True)
         tab_docs_layout.addWidget(lbl_filter)
 
         self.txt_doc_search = QLineEdit()
@@ -1136,12 +1544,13 @@ class MainWindow(QMainWindow):
         tab_docs_layout.addWidget(self.txt_doc_search)
 
         self.list_docs = QListWidget()
-        self.list_docs.setFixedHeight(120)
+        self.list_docs.setFixedHeight(110)
         self.list_docs.itemClicked.connect(self._on_doc_selected)
         tab_docs_layout.addWidget(self.list_docs)
 
         self.lbl_selected_doc_info = QLabel("Selected: None")
         self.lbl_selected_doc_info.setStyleSheet("color: #58a6ff; font-weight: bold;")
+        self.lbl_selected_doc_info.setWordWrap(True)
         tab_docs_layout.addWidget(self.lbl_selected_doc_info)
 
         # Tab 1 Prompts: Stage 1, Stage 2, Stage 3
@@ -1193,13 +1602,18 @@ class MainWindow(QMainWindow):
         layout_doc_s3.addWidget(self.txt_doc_stage3_prompt)
         tab_docs_layout.addWidget(grp_doc_s3)
 
-        self.input_tabs.addTab(tab_docs, "AruMLStudio Docs Selection")
+        self.input_tabs.addTab(tab_docs, "Document Review")
 
         # Tab 2: Custom Architecture Concept
         tab_concept = QWidget()
         tab_concept_layout = QVBoxLayout(tab_concept)
+        tab_concept_layout.setContentsMargins(8, 8, 8, 8)
+        tab_concept_layout.setSpacing(8)
 
-        tab_concept_layout.addWidget(QLabel("Enter Custom Architecture Requirements:"))
+        lbl_custom_concept = QLabel("Enter Custom Architecture Requirements:")
+        lbl_custom_concept.setWordWrap(True)
+        tab_concept_layout.addWidget(lbl_custom_concept)
+
         self.txt_concept = QTextEdit()
         self.txt_concept.setFixedHeight(110)
         self.txt_concept.setPlaceholderText(
@@ -1236,8 +1650,11 @@ class MainWindow(QMainWindow):
         # Tab 3: Implementation Plan Review Mode (Tri-Model Flow)
         tab_plan = QWidget()
         tab_plan_layout = QVBoxLayout(tab_plan)
+        tab_plan_layout.setContentsMargins(8, 8, 8, 8)
+        tab_plan_layout.setSpacing(8)
 
         lbl_plan_filter = QLabel("Select Implementation Plan Document (e.g. F-ENHANCEMENT_ARCHITECTURE_IMPLEMENTATION_PLAN.md):")
+        lbl_plan_filter.setWordWrap(True)
         tab_plan_layout.addWidget(lbl_plan_filter)
 
         self.txt_plan_search = QLineEdit()
@@ -1246,17 +1663,19 @@ class MainWindow(QMainWindow):
         tab_plan_layout.addWidget(self.txt_plan_search)
 
         self.list_plan_docs = QListWidget()
-        self.list_plan_docs.setFixedHeight(100)
+        self.list_plan_docs.setFixedHeight(95)
         self.list_plan_docs.itemClicked.connect(self._on_plan_doc_selected)
         tab_plan_layout.addWidget(self.list_plan_docs)
 
         self.lbl_selected_plan_info = QLabel("Selected Plan: None")
         self.lbl_selected_plan_info.setStyleSheet("color: #a78bfa; font-weight: bold;")
+        self.lbl_selected_plan_info.setWordWrap(True)
         tab_plan_layout.addWidget(self.lbl_selected_plan_info)
 
         # Interaction Iterations Selector Row
         iter_row = QHBoxLayout()
-        lbl_iter = QLabel("Interaction Iterations (ChatGPT ➔ Gemini/NotebookLM):")
+        iter_row.setSpacing(8)
+        lbl_iter = QLabel("Iterations:")
         lbl_iter.setStyleSheet("color: #e3b341; font-weight: bold;")
         iter_row.addWidget(lbl_iter)
 
@@ -1268,26 +1687,47 @@ class MainWindow(QMainWindow):
         saved_iters = self.config.get("orchestration", {}).get("plan_iterations", 3)
         target_idx = max(0, min(9, saved_iters - 1))
         self.combo_iterations.setCurrentIndex(target_idx)
-        self.combo_iterations.currentIndexChanged.connect(self._auto_save_prompts)
-        iter_row.addWidget(self.combo_iterations)
+        self.combo_iterations.currentIndexChanged.connect(self._on_agent_selection_changed)
+        iter_row.addWidget(self.combo_iterations, 1)
 
-        self.btn_refresh_plan_docs = QPushButton("🔄 Refresh Files (Latest)")
+        self.btn_refresh_plan_docs = QPushButton("🔄 Refresh Files")
         self.btn_refresh_plan_docs.setObjectName("btnSecondary")
         self.btn_refresh_plan_docs.setToolTip("Rescan docs folder and automatically select the most recently updated file")
         self.btn_refresh_plan_docs.clicked.connect(self._on_refresh_files_clicked)
-        iter_row.addWidget(self.btn_refresh_plan_docs)
+        iter_row.addWidget(self.btn_refresh_plan_docs, 1)
 
-        iter_row.addStretch()
         tab_plan_layout.addLayout(iter_row)
-
 
         lbl_flow_info = QLabel("Tri-Model Flow: ChatGPT (Aggregator) ➔ Gemini & NotebookLM (Dual Reviewers) ➔ ChatGPT (Refined Plan) [Loops across selected iterations]")
         lbl_flow_info.setStyleSheet("color: #8b949e; font-size: 11px; font-style: italic;")
-        tab_plan_layout.addWidget(lbl_flow_info)
+        lbl_flow_info.setWordWrap(True)
+        self.lbl_flow_info = lbl_flow_info
+        tab_plan_layout.addWidget(self.lbl_flow_info)
 
-        # Tab 3 Prompts: 4 Dedicated Boxes
-        grp_plan_gpt1 = QGroupBox("1. Prompt for ChatGPT (Initial Plan / Source Preparation)")
-        layout_plan_gpt1 = QVBoxLayout(grp_plan_gpt1)
+        # Tab 3 Prompts: 4 Dedicated Boxes with Selectable Agent Dropdowns
+        # Box 1: Initial Plan / Source Preparation
+        grp_plan_1 = QGroupBox("1. Initial Plan / Source Preparation")
+        grp_plan_1.setStyleSheet("QGroupBox { color: #10a37f; border: 1px solid #1a4738; }")
+        layout_plan_1 = QVBoxLayout(grp_plan_1)
+        layout_plan_1.setContentsMargins(8, 10, 8, 8)
+        layout_plan_1.setSpacing(6)
+
+        row_agent_1 = QHBoxLayout()
+        row_agent_1.setSpacing(8)
+        lbl_agent_1 = QLabel("Target Agent:")
+        lbl_agent_1.setStyleSheet("color: #8b949e; font-size: 11px; font-weight: bold;")
+        row_agent_1.addWidget(lbl_agent_1)
+
+        self.combo_plan_agent1 = QComboBox()
+        self.combo_plan_agent1.addItems(["ChatGPT", "NotebookLM", "Gemini", "Grok", "Claude", "Copilot"])
+        saved_agent1 = self.config.get("agents", {}).get("plan_agent1", "ChatGPT")
+        self.combo_plan_agent1.setCurrentText(saved_agent1)
+        self.combo_plan_agent1.setFixedHeight(26)
+        self.combo_plan_agent1.currentTextChanged.connect(self._on_agent_selection_changed)
+        row_agent_1.addWidget(self.combo_plan_agent1, 1)
+        row_agent_1.addStretch()
+        layout_plan_1.addLayout(row_agent_1)
+
         self.txt_plan_chatgpt1_prompt = QTextEdit()
         self.txt_plan_chatgpt1_prompt.setFixedHeight(75)
         saved_plan_gpt1 = self.config.get("prompts", {}).get(
@@ -1296,12 +1736,32 @@ class MainWindow(QMainWindow):
         )
         self.txt_plan_chatgpt1_prompt.setText(saved_plan_gpt1)
         self.txt_plan_chatgpt1_prompt.textChanged.connect(self._auto_save_prompts)
-        layout_plan_gpt1.addWidget(self.txt_plan_chatgpt1_prompt)
-        tab_plan_layout.addWidget(grp_plan_gpt1)
+        layout_plan_1.addWidget(self.txt_plan_chatgpt1_prompt)
+        tab_plan_layout.addWidget(grp_plan_1)
 
-        grp_plan_gemini = QGroupBox("2. Prompt for Gemini (Implementation & Codebase Review)")
-        grp_plan_gemini.setStyleSheet("QGroupBox { color: #a78bfa; border: 1px solid #3d2d5b; }")
-        layout_plan_gemini = QVBoxLayout(grp_plan_gemini)
+        # Box 2: Codebase Architecture Review
+        grp_plan_2 = QGroupBox("2. Codebase Architecture Review")
+        grp_plan_2.setStyleSheet("QGroupBox { color: #a78bfa; border: 1px solid #3d2d5b; }")
+        layout_plan_2 = QVBoxLayout(grp_plan_2)
+        layout_plan_2.setContentsMargins(8, 10, 8, 8)
+        layout_plan_2.setSpacing(6)
+
+        row_agent_2 = QHBoxLayout()
+        row_agent_2.setSpacing(8)
+        lbl_agent_2 = QLabel("Target Agent:")
+        lbl_agent_2.setStyleSheet("color: #8b949e; font-size: 11px; font-weight: bold;")
+        row_agent_2.addWidget(lbl_agent_2)
+
+        self.combo_plan_agent2 = QComboBox()
+        self.combo_plan_agent2.addItems(["ChatGPT", "NotebookLM", "Gemini", "Grok", "Claude", "Copilot"])
+        saved_agent2 = self.config.get("agents", {}).get("plan_agent2", "Gemini")
+        self.combo_plan_agent2.setCurrentText(saved_agent2)
+        self.combo_plan_agent2.setFixedHeight(26)
+        self.combo_plan_agent2.currentTextChanged.connect(self._on_agent_selection_changed)
+        row_agent_2.addWidget(self.combo_plan_agent2, 1)
+        row_agent_2.addStretch()
+        layout_plan_2.addLayout(row_agent_2)
+
         self.txt_plan_gemini_prompt = QTextEdit()
         self.txt_plan_gemini_prompt.setFixedHeight(75)
         saved_plan_gemini = self.config.get("prompts", {}).get(
@@ -1310,12 +1770,32 @@ class MainWindow(QMainWindow):
         )
         self.txt_plan_gemini_prompt.setText(saved_plan_gemini)
         self.txt_plan_gemini_prompt.textChanged.connect(self._auto_save_prompts)
-        layout_plan_gemini.addWidget(self.txt_plan_gemini_prompt)
-        tab_plan_layout.addWidget(grp_plan_gemini)
+        layout_plan_2.addWidget(self.txt_plan_gemini_prompt)
+        tab_plan_layout.addWidget(grp_plan_2)
 
-        grp_plan_nb = QGroupBox("3. Prompt for NotebookLM (Cross-Document Evaluation)")
-        grp_plan_nb.setStyleSheet("QGroupBox { color: #58a6ff; border: 1px solid #1c3553; }")
-        layout_plan_nb = QVBoxLayout(grp_plan_nb)
+        # Box 3: Cross-Document Evaluation
+        grp_plan_3 = QGroupBox("3. Cross-Document Evaluation")
+        grp_plan_3.setStyleSheet("QGroupBox { color: #58a6ff; border: 1px solid #1c3553; }")
+        layout_plan_3 = QVBoxLayout(grp_plan_3)
+        layout_plan_3.setContentsMargins(8, 10, 8, 8)
+        layout_plan_3.setSpacing(6)
+
+        row_agent_3 = QHBoxLayout()
+        row_agent_3.setSpacing(8)
+        lbl_agent_3 = QLabel("Target Agent:")
+        lbl_agent_3.setStyleSheet("color: #8b949e; font-size: 11px; font-weight: bold;")
+        row_agent_3.addWidget(lbl_agent_3)
+
+        self.combo_plan_agent3 = QComboBox()
+        self.combo_plan_agent3.addItems(["ChatGPT", "NotebookLM", "Gemini", "Grok", "Claude", "Copilot"])
+        saved_agent3 = self.config.get("agents", {}).get("plan_agent3", "NotebookLM")
+        self.combo_plan_agent3.setCurrentText(saved_agent3)
+        self.combo_plan_agent3.setFixedHeight(26)
+        self.combo_plan_agent3.currentTextChanged.connect(self._on_agent_selection_changed)
+        row_agent_3.addWidget(self.combo_plan_agent3, 1)
+        row_agent_3.addStretch()
+        layout_plan_3.addLayout(row_agent_3)
+
         self.txt_plan_notebooklm_prompt = QTextEdit()
         self.txt_plan_notebooklm_prompt.setFixedHeight(75)
         saved_plan_nb = self.config.get("prompts", {}).get(
@@ -1324,12 +1804,32 @@ class MainWindow(QMainWindow):
         )
         self.txt_plan_notebooklm_prompt.setText(saved_plan_nb)
         self.txt_plan_notebooklm_prompt.textChanged.connect(self._auto_save_prompts)
-        layout_plan_nb.addWidget(self.txt_plan_notebooklm_prompt)
-        tab_plan_layout.addWidget(grp_plan_nb)
+        layout_plan_3.addWidget(self.txt_plan_notebooklm_prompt)
+        tab_plan_layout.addWidget(grp_plan_3)
 
-        grp_plan_final = QGroupBox("4. Prompt for ChatGPT (Final Refinement & Aggregator)")
-        grp_plan_final.setStyleSheet("QGroupBox { color: #10a37f; border: 1px solid #1a4738; }")
-        layout_plan_final = QVBoxLayout(grp_plan_final)
+        # Box 4: Final Refinement & Aggregator
+        grp_plan_4 = QGroupBox("4. Final Refinement & Aggregator")
+        grp_plan_4.setStyleSheet("QGroupBox { color: #10a37f; border: 1px solid #1a4738; }")
+        layout_plan_4 = QVBoxLayout(grp_plan_4)
+        layout_plan_4.setContentsMargins(8, 10, 8, 8)
+        layout_plan_4.setSpacing(6)
+
+        row_agent_4 = QHBoxLayout()
+        row_agent_4.setSpacing(8)
+        lbl_agent_4 = QLabel("Target Agent:")
+        lbl_agent_4.setStyleSheet("color: #8b949e; font-size: 11px; font-weight: bold;")
+        row_agent_4.addWidget(lbl_agent_4)
+
+        self.combo_plan_agent4 = QComboBox()
+        self.combo_plan_agent4.addItems(["ChatGPT", "NotebookLM", "Gemini", "Grok", "Claude", "Copilot"])
+        saved_agent4 = self.config.get("agents", {}).get("plan_agent4", "ChatGPT")
+        self.combo_plan_agent4.setCurrentText(saved_agent4)
+        self.combo_plan_agent4.setFixedHeight(26)
+        self.combo_plan_agent4.currentTextChanged.connect(self._on_agent_selection_changed)
+        row_agent_4.addWidget(self.combo_plan_agent4, 1)
+        row_agent_4.addStretch()
+        layout_plan_4.addLayout(row_agent_4)
+
         self.txt_plan_chatgpt_final_prompt = QTextEdit()
         self.txt_plan_chatgpt_final_prompt.setFixedHeight(75)
         saved_plan_final = self.config.get("prompts", {}).get(
@@ -1338,41 +1838,211 @@ class MainWindow(QMainWindow):
         )
         self.txt_plan_chatgpt_final_prompt.setText(saved_plan_final)
         self.txt_plan_chatgpt_final_prompt.textChanged.connect(self._auto_save_prompts)
-        layout_plan_final.addWidget(self.txt_plan_chatgpt_final_prompt)
-        tab_plan_layout.addWidget(grp_plan_final)
+        layout_plan_4.addWidget(self.txt_plan_chatgpt_final_prompt)
+        tab_plan_layout.addWidget(grp_plan_4)
+
+        self._update_flow_info_label()
 
         self.input_tabs.addTab(tab_plan, "Implementation Plan")
+
+        # -------------------------------------------------------------
+        # Tab 4: Multi-Agent Prompt Broadcast
+        # -------------------------------------------------------------
+        tab_broadcast = QWidget()
+        tab_broadcast_layout = QVBoxLayout(tab_broadcast)
+        tab_broadcast_layout.setContentsMargins(8, 8, 8, 8)
+        tab_broadcast_layout.setSpacing(8)
+
+        lbl_b_desc = QLabel("Broadcast a prompt to multiple AI models simultaneously, optionally attach an F-document, and download/save aggregated replies:")
+        lbl_b_desc.setStyleSheet("color: #8b949e; font-size: 11px;")
+        lbl_b_desc.setWordWrap(True)
+        tab_broadcast_layout.addWidget(lbl_b_desc)
+
+        # 1. Select F-Document (Optional Attachment)
+        grp_b_doc = QGroupBox("Select F-Document (Optional Reference)")
+        grp_b_doc.setStyleSheet("QGroupBox { color: #d97706; font-weight: bold; border: 1px solid #78350f; }")
+        layout_b_doc = QVBoxLayout(grp_b_doc)
+        layout_b_doc.setContentsMargins(8, 10, 8, 8)
+        layout_b_doc.setSpacing(6)
+
+        row_doc_top = QHBoxLayout()
+        row_doc_top.setSpacing(6)
+        self.txt_broadcast_doc_search = QLineEdit()
+        self.txt_broadcast_doc_search.setPlaceholderText("Filter F-documents...")
+        self.txt_broadcast_doc_search.textChanged.connect(self._filter_broadcast_docs)
+        row_doc_top.addWidget(self.txt_broadcast_doc_search, 1)
+
+        btn_refresh_b_docs = QPushButton("🔄 Refresh")
+        btn_refresh_b_docs.setFixedHeight(26)
+        btn_refresh_b_docs.setObjectName("btnSecondary")
+        btn_refresh_b_docs.clicked.connect(self._load_docs_list)
+        row_doc_top.addWidget(btn_refresh_b_docs)
+        layout_b_doc.addLayout(row_doc_top)
+
+        self.list_broadcast_docs = QListWidget()
+        self.list_broadcast_docs.setFixedHeight(95)
+        self.list_broadcast_docs.itemClicked.connect(self._on_broadcast_doc_selected)
+        layout_b_doc.addWidget(self.list_broadcast_docs)
+
+        self.lbl_selected_broadcast_doc_info = QLabel("Attached Document: None (Prompt only)")
+        self.lbl_selected_broadcast_doc_info.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.lbl_selected_broadcast_doc_info.setWordWrap(True)
+        layout_b_doc.addWidget(self.lbl_selected_broadcast_doc_info)
+
+        tab_broadcast_layout.addWidget(grp_b_doc)
+
+        # 2. Broadcast Prompt Box
+        grp_b_prompt = QGroupBox("Prompt for All Selected Agents")
+        grp_b_prompt.setStyleSheet("QGroupBox { color: #58a6ff; font-weight: bold; border: 1px solid #1c3553; }")
+        layout_b_prompt = QVBoxLayout(grp_b_prompt)
+        layout_b_prompt.setContentsMargins(8, 10, 8, 8)
+        self.txt_broadcast_prompt = QTextEdit()
+        self.txt_broadcast_prompt.setPlaceholderText("Type prompt to broadcast across all selected agents (e.g. Please analyze this architecture pattern and give pros/cons)...")
+        self.txt_broadcast_prompt.setFixedHeight(105)
+        saved_b_prompt = self.config.get("prompts", {}).get(
+            "broadcast_prompt",
+            "Please review this architectural design question. Detail strengths, edge cases, failure modes, and concrete recommendations."
+        )
+        self.txt_broadcast_prompt.setText(saved_b_prompt)
+        self.txt_broadcast_prompt.textChanged.connect(self._auto_save_prompts)
+        layout_b_prompt.addWidget(self.txt_broadcast_prompt)
+
+        self.chk_attach_doc_content = QCheckBox("📎 Attach Selected Document Content (Prompt description first, entire document second)")
+        self.chk_attach_doc_content.setChecked(self.config.get("broadcast", {}).get("attach_doc", True))
+        self.chk_attach_doc_content.setStyleSheet("color: #58a6ff; font-size: 11px; font-weight: bold; margin-top: 2px;")
+        self.chk_attach_doc_content.stateChanged.connect(self._auto_save_prompts)
+        layout_b_prompt.addWidget(self.chk_attach_doc_content)
+
+        tab_broadcast_layout.addWidget(grp_b_prompt)
+
+        # 3. Selectable Agents with Checkboxes
+        grp_b_agents = QGroupBox("Target AI Agents (Check to Include)")
+        grp_b_agents.setStyleSheet("QGroupBox { color: #10a37f; font-weight: bold; border: 1px solid #1a4738; }")
+        layout_b_agents = QVBoxLayout(grp_b_agents)
+        layout_b_agents.setContentsMargins(8, 10, 8, 8)
+        layout_b_agents.setSpacing(6)
+
+        b_agents_cfg = self.config.get("broadcast_agents", {})
+
+        grid_agents = QGridLayout()
+        grid_agents.setHorizontalSpacing(15)
+        grid_agents.setVerticalSpacing(8)
+
+        self.chk_agent_chatgpt = QCheckBox("ChatGPT")
+        self.chk_agent_chatgpt.setChecked(b_agents_cfg.get("chatgpt", True))
+        self.chk_agent_chatgpt.stateChanged.connect(self._auto_save_prompts)
+        grid_agents.addWidget(self.chk_agent_chatgpt, 0, 0)
+
+        self.chk_agent_notebooklm = QCheckBox("NotebookLM")
+        self.chk_agent_notebooklm.setChecked(b_agents_cfg.get("notebooklm", True))
+        self.chk_agent_notebooklm.stateChanged.connect(self._auto_save_prompts)
+        grid_agents.addWidget(self.chk_agent_notebooklm, 0, 1)
+
+        self.chk_agent_gemini = QCheckBox("Gemini")
+        self.chk_agent_gemini.setChecked(b_agents_cfg.get("gemini", True))
+        self.chk_agent_gemini.stateChanged.connect(self._auto_save_prompts)
+        grid_agents.addWidget(self.chk_agent_gemini, 0, 2)
+
+        self.chk_agent_grok = QCheckBox("Grok")
+        self.chk_agent_grok.setChecked(b_agents_cfg.get("grok", True))
+        self.chk_agent_grok.stateChanged.connect(self._auto_save_prompts)
+        grid_agents.addWidget(self.chk_agent_grok, 1, 0)
+
+        self.chk_agent_claude = QCheckBox("Claude")
+        self.chk_agent_claude.setChecked(b_agents_cfg.get("claude", True))
+        self.chk_agent_claude.stateChanged.connect(self._auto_save_prompts)
+        grid_agents.addWidget(self.chk_agent_claude, 1, 1)
+
+        self.chk_agent_copilot = QCheckBox("Copilot")
+        self.chk_agent_copilot.setChecked(b_agents_cfg.get("copilot", True))
+        self.chk_agent_copilot.stateChanged.connect(self._auto_save_prompts)
+        grid_agents.addWidget(self.chk_agent_copilot, 1, 2)
+
+        layout_b_agents.addLayout(grid_agents)
+
+        row_sel_helpers = QHBoxLayout()
+        row_sel_helpers.setSpacing(8)
+        btn_sel_all = QPushButton("Select All")
+        btn_sel_all.setFixedHeight(24)
+        btn_sel_all.setObjectName("btnSecondary")
+        btn_sel_all.clicked.connect(lambda: self._select_all_broadcast_agents(True))
+        row_sel_helpers.addWidget(btn_sel_all)
+
+        btn_clear_all = QPushButton("Clear All")
+        btn_clear_all.setFixedHeight(24)
+        btn_clear_all.setObjectName("btnSecondary")
+        btn_clear_all.clicked.connect(lambda: self._select_all_broadcast_agents(False))
+        row_sel_helpers.addWidget(btn_clear_all)
+        row_sel_helpers.addStretch()
+        layout_b_agents.addLayout(row_sel_helpers)
+
+        tab_broadcast_layout.addWidget(grp_b_agents)
+
+        # 3. Dedicated Tab 4 Actions: Submit & Download
+        row_b_actions = QVBoxLayout()
+        row_b_actions.setSpacing(6)
+
+        self.btn_broadcast_submit = QPushButton("🚀 Submit Prompt to All Selected Agents")
+        self.btn_broadcast_submit.setFixedHeight(38)
+        self.btn_broadcast_submit.clicked.connect(self._start_broadcast_prompt)
+        row_b_actions.addWidget(self.btn_broadcast_submit)
+
+        row_b_sub = QHBoxLayout()
+        row_b_sub.setSpacing(8)
+        self.btn_broadcast_download = QPushButton("💾 Download / Export Responses (.md)")
+        self.btn_broadcast_download.setFixedHeight(34)
+        self.btn_broadcast_download.setObjectName("btnSecondary")
+        self.btn_broadcast_download.setEnabled(False)
+        self.btn_broadcast_download.clicked.connect(self._download_broadcast_response)
+        row_b_sub.addWidget(self.btn_broadcast_download, 3)
+
+        self.btn_broadcast_stop = QPushButton("⏹ Stop")
+        self.btn_broadcast_stop.setFixedHeight(34)
+        self.btn_broadcast_stop.setObjectName("btnStop")
+        self.btn_broadcast_stop.setEnabled(False)
+        self.btn_broadcast_stop.clicked.connect(self._stop_broadcast)
+        row_b_sub.addWidget(self.btn_broadcast_stop, 1)
+
+        row_b_actions.addLayout(row_b_sub)
+        tab_broadcast_layout.addLayout(row_b_actions)
+        tab_broadcast_layout.addStretch()
+
+        self.input_tabs.addTab(tab_broadcast, "Multi-Agent Prompt")
+
         saved_tab_idx = self.config.get("ui", {}).get("active_tab", 0)
-        self.input_tabs.setCurrentIndex(max(0, min(2, saved_tab_idx)))
+        self.input_tabs.setCurrentIndex(max(0, min(3, saved_tab_idx)))
         self.input_tabs.currentChanged.connect(self._auto_save_prompts)
         left_layout.addWidget(self.input_tabs)
 
+        # Action Buttons Layout (2-row stacked layout so nothing is cut off horizontally)
+        btn_box = QVBoxLayout()
+        btn_box.setSpacing(6)
 
-
-
-        # Action Buttons
-        btn_layout = QHBoxLayout()
-        self.btn_run = QPushButton("Start Full (Stage 1 ➔ Stage 2 ➔ Stage 3)")
+        # Primary Action (Full Width)
+        self.btn_run = QPushButton("🚀 Start Tri-Model Flow (Stage 1 ➔ Stage 2 ➔ Stage 3)")
         self.btn_run.setFixedHeight(38)
         self.btn_run.clicked.connect(self._start_orchestration)
-        btn_layout.addWidget(self.btn_run)
+        btn_box.addWidget(self.btn_run)
 
-        self.btn_run_stage2_only = QPushButton("Run Stage 2 Only (NotebookLM)")
-        self.btn_run_stage2_only.setFixedHeight(38)
+        # Secondary Action + Stop in one row
+        sub_btn_layout = QHBoxLayout()
+        sub_btn_layout.setSpacing(8)
+
+        self.btn_run_stage2_only = QPushButton("⚡ Run Stage 2 Only (NotebookLM)")
+        self.btn_run_stage2_only.setFixedHeight(36)
         self.btn_run_stage2_only.setObjectName("btnSecondary")
         self.btn_run_stage2_only.clicked.connect(self._start_stage2_only_orchestration)
-        btn_layout.addWidget(self.btn_run_stage2_only)
+        sub_btn_layout.addWidget(self.btn_run_stage2_only, 3)
 
-        self.btn_stop = QPushButton("Stop")
-        self.btn_stop.setFixedHeight(38)
+        self.btn_stop = QPushButton("⏹ Stop")
+        self.btn_stop.setFixedHeight(36)
         self.btn_stop.setObjectName("btnStop")
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._stop_orchestration)
-        btn_layout.addWidget(self.btn_stop)
+        sub_btn_layout.addWidget(self.btn_stop, 1)
 
-        left_layout.addLayout(btn_layout)
-
-
+        btn_box.addLayout(sub_btn_layout)
+        left_layout.addLayout(btn_box)
 
         left_scroll.setWidget(left_widget)
         splitter.addWidget(left_scroll)
@@ -1394,7 +2064,17 @@ class MainWindow(QMainWindow):
         self.txt_output_critique = QTextBrowser()
         self.output_tabs.addTab(self.txt_output_critique, "Stage 2: NotebookLM Evaluation")
 
-        # Output Tab 3: Git History
+        # Output Tab 3: Recommendations (Live Multi-Agent Streaming)
+        self.txt_output_recommendations = QTextBrowser()
+        self.txt_output_recommendations.setOpenExternalLinks(True)
+        self.output_tabs.addTab(self.txt_output_recommendations, "Recommendations")
+
+        # Output Tab 4: Multi-Agent Responses
+        self.txt_output_broadcast = QTextBrowser()
+        self.txt_output_broadcast.setOpenExternalLinks(True)
+        self.output_tabs.addTab(self.txt_output_broadcast, "Multi-Agent Responses")
+
+        # Output Tab 5: Git History
         tab_history = QWidget()
         tab_hist_layout = QVBoxLayout(tab_history)
         self.tbl_history = QTableWidget(0, 3)
@@ -1405,7 +2085,7 @@ class MainWindow(QMainWindow):
         tab_hist_layout.addWidget(self.tbl_history)
         self.output_tabs.addTab(tab_history, "Git Workspace History")
 
-        # Output Tab 4: Execution Log
+        # Output Tab 6: Execution Log
         self.txt_log = QPlainTextEdit()
         self.txt_log.setReadOnly(True)
         self.output_tabs.addTab(self.txt_log, "Live Execution Log")
@@ -1413,7 +2093,11 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.output_tabs)
         splitter.addWidget(right_widget)
 
-        splitter.setSizes([620, 1080])
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setSizes([750, 950])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(splitter)
 
@@ -1445,6 +2129,13 @@ class MainWindow(QMainWindow):
     def _load_docs_list(self):
         self.list_docs.clear()
         self.list_plan_docs.clear()
+        if hasattr(self, "list_broadcast_docs"):
+            self.list_broadcast_docs.clear()
+            none_item = QListWidgetItem("None (No document attached)")
+            none_item.setData(Qt.UserRole, "None")
+            none_item.setForeground(QColor("#8b949e"))
+            self.list_broadcast_docs.addItem(none_item)
+
         if not os.path.exists(self.docs_dir):
             return
 
@@ -1461,8 +2152,26 @@ class MainWindow(QMainWindow):
                 plan_item.setData(Qt.UserRole, fname)
                 self.list_plan_docs.addItem(plan_item)
 
+                if hasattr(self, "list_broadcast_docs"):
+                    b_item = QListWidgetItem(f"{fname} ({size_kb} KB)")
+                    b_item.setData(Qt.UserRole, fname)
+                    self.list_broadcast_docs.addItem(b_item)
+
+        # Also discover any F-documents created in ./workspace
+        workspace_dir = self.config.get("workspace", {}).get("dir", "./workspace")
+        if os.path.exists(workspace_dir) and hasattr(self, "list_broadcast_docs"):
+            existing_b_docs = {self.list_broadcast_docs.item(i).data(Qt.UserRole) for i in range(self.list_broadcast_docs.count())}
+            for wfname in sorted(os.listdir(workspace_dir)):
+                if wfname.endswith(".md") and (wfname.upper().startswith("F") or "plan" in wfname.lower()) and wfname not in existing_b_docs:
+                    wfpath = os.path.join(workspace_dir, wfname)
+                    size_kb = round(os.path.getsize(wfpath) / 1024, 1)
+                    b_item = QListWidgetItem(f"[workspace] {wfname} ({size_kb} KB)")
+                    b_item.setData(Qt.UserRole, wfname)
+                    self.list_broadcast_docs.addItem(b_item)
+
         saved_doc = self.config.get("ui", {}).get("selected_doc", "")
         saved_plan_doc = self.config.get("ui", {}).get("selected_plan_doc", "")
+        saved_broadcast_doc = self.config.get("ui", {}).get("selected_broadcast_doc", "None")
 
         if self.list_docs.count() > 0:
             doc_found = False
@@ -1499,6 +2208,49 @@ class MainWindow(QMainWindow):
             if not plan_found:
                 self.list_plan_docs.setCurrentRow(0)
                 self._on_plan_doc_selected(self.list_plan_docs.item(0))
+
+        if hasattr(self, "list_broadcast_docs") and self.list_broadcast_docs.count() > 0:
+            b_found = False
+            if saved_broadcast_doc:
+                for i in range(self.list_broadcast_docs.count()):
+                    bitem = self.list_broadcast_docs.item(i)
+                    if bitem.data(Qt.UserRole) == saved_broadcast_doc:
+                        self.list_broadcast_docs.setCurrentRow(i)
+                        self._on_broadcast_doc_selected(bitem)
+                        b_found = True
+                        break
+            if not b_found:
+                self.list_broadcast_docs.setCurrentRow(0)
+                self._on_broadcast_doc_selected(self.list_broadcast_docs.item(0))
+
+    def _filter_broadcast_docs(self, query: str):
+        """Filter F-documents inside Tab 4 search box."""
+        q = (query or "").strip().lower()
+        matched_item = None
+        for i in range(self.list_broadcast_docs.count()):
+            item = self.list_broadcast_docs.item(i)
+            doc_name = (item.data(Qt.UserRole) or "").lower()
+            if doc_name == "none":
+                item.setHidden(False)
+            elif not q or q in item.text().lower() or q in doc_name:
+                item.setHidden(False)
+                if matched_item is None:
+                    matched_item = item
+            else:
+                item.setHidden(True)
+
+    def _on_broadcast_doc_selected(self, item: QListWidgetItem):
+        """Handle selection of F-document in Tab 4."""
+        if not item or not hasattr(self, "lbl_selected_broadcast_doc_info"):
+            return
+        doc_name = item.data(Qt.UserRole)
+        if doc_name == "None":
+            self.lbl_selected_broadcast_doc_info.setText("Attached Document: None (Prompt only)")
+            self.lbl_selected_broadcast_doc_info.setStyleSheet("color: #8b949e; font-size: 11px;")
+        else:
+            self.lbl_selected_broadcast_doc_info.setText(f"Attached Document: {doc_name}")
+            self.lbl_selected_broadcast_doc_info.setStyleSheet("color: #3fb950; font-weight: bold; font-size: 11px;")
+        self._auto_save_prompts()
 
     def _filter_docs_list(self, text: str):
         query = text.strip().lower()
@@ -1652,6 +2404,319 @@ class MainWindow(QMainWindow):
         else:
             os.system(f"xdg-open '{ws_dir}'")
 
+    def _open_settings_dialog(self):
+        """Open a modal settings dialog to view and configure source documents path and output workspace folder."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Application Settings - Folders & Paths")
+        dialog.setMinimumWidth(680)
+        dialog.setStyleSheet(self.styleSheet())
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        header = QLabel("<h3>⚙️ Application Folder & Directory Settings</h3>")
+        header.setStyleSheet("color: #58a6ff; margin-bottom: 2px;")
+        layout.addWidget(header)
+
+        desc = QLabel("Configure the source folder for architecture documentation and the output workspace directory for generated revisions, git history, and broadcast exports:")
+        desc.setStyleSheet("color: #8b949e; font-size: 12px; margin-bottom: 8px;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        form = QFormLayout()
+        form.setSpacing(14)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignTop)
+
+        # 1. Source Documents Directory
+        w_source = QWidget()
+        l_source = QVBoxLayout(w_source)
+        l_source.setContentsMargins(0, 0, 0, 0)
+        l_source.setSpacing(4)
+
+        r_source = QHBoxLayout()
+        r_source.setSpacing(8)
+        txt_source_dir = QLineEdit(self.docs_dir)
+        txt_source_dir.setFixedHeight(30)
+        r_source.addWidget(txt_source_dir, 1)
+
+        btn_browse_source = QPushButton("📂 Browse...")
+        btn_browse_source.setObjectName("btnSecondary")
+        btn_browse_source.setFixedHeight(30)
+        btn_browse_source.setMinimumWidth(100)
+
+        def on_browse_source():
+            init_dir = txt_source_dir.text().strip()
+            if not os.path.exists(init_dir):
+                init_dir = os.getcwd()
+            chosen = QFileDialog.getExistingDirectory(dialog, "Select Source Documents Directory", init_dir)
+            if chosen:
+                txt_source_dir.setText(os.path.normpath(chosen))
+
+        btn_browse_source.clicked.connect(on_browse_source)
+        r_source.addWidget(btn_browse_source)
+        l_source.addLayout(r_source)
+
+        lbl_source_note = QLabel("Directory containing source .md documents (populated in Document Review, Plan, and Broadcast tabs).")
+        lbl_source_note.setStyleSheet("color: #8b949e; font-size: 11px;")
+        l_source.addWidget(lbl_source_note)
+
+        lbl_src_title = QLabel("Source Docs Path:")
+        lbl_src_title.setStyleSheet("color: #58a6ff; font-weight: bold;")
+        form.addRow(lbl_src_title, w_source)
+
+        # 2. Output / Workspace Directory
+        w_out = QWidget()
+        l_out = QVBoxLayout(w_out)
+        l_out.setContentsMargins(0, 0, 0, 0)
+        l_out.setSpacing(4)
+
+        r_out = QHBoxLayout()
+        r_out.setSpacing(8)
+        current_ws = self.config.get("workspace", {}).get("dir", "./workspace")
+        txt_out_dir = QLineEdit(current_ws)
+        txt_out_dir.setFixedHeight(30)
+        r_out.addWidget(txt_out_dir, 1)
+
+        btn_browse_out = QPushButton("📂 Browse...")
+        btn_browse_out.setObjectName("btnSecondary")
+        btn_browse_out.setFixedHeight(30)
+        btn_browse_out.setMinimumWidth(100)
+
+        def on_browse_out():
+            init_dir = txt_out_dir.text().strip()
+            if not os.path.isabs(init_dir):
+                init_dir = os.path.abspath(init_dir)
+            if not os.path.exists(init_dir):
+                init_dir = os.getcwd()
+            chosen = QFileDialog.getExistingDirectory(dialog, "Select Output Workspace Directory", init_dir)
+            if chosen:
+                txt_out_dir.setText(os.path.normpath(chosen))
+
+        btn_browse_out.clicked.connect(on_browse_out)
+        r_out.addWidget(btn_browse_out)
+        l_out.addLayout(r_out)
+
+        lbl_out_note = QLabel("Directory where generated documents, version snapshots, git history, and broadcast exports are saved.")
+        lbl_out_note.setStyleSheet("color: #8b949e; font-size: 11px;")
+        l_out.addWidget(lbl_out_note)
+
+        lbl_out_title = QLabel("Output Folder Path:")
+        lbl_out_title.setStyleSheet("color: #10a37f; font-weight: bold;")
+        form.addRow(lbl_out_title, w_out)
+
+        layout.addLayout(form)
+
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+
+        btn_save = QPushButton("Save & Apply")
+        btn_save.setFixedHeight(34)
+        btn_save.setMinimumWidth(110)
+        btn_save.clicked.connect(dialog.accept)
+        btn_box.addWidget(btn_save)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setObjectName("btnSecondary")
+        btn_cancel.setFixedHeight(34)
+        btn_cancel.setMinimumWidth(80)
+        btn_cancel.clicked.connect(dialog.reject)
+        btn_box.addWidget(btn_cancel)
+
+        layout.addLayout(btn_box)
+
+        if dialog.exec() == QDialog.Accepted:
+            new_source = txt_source_dir.text().strip()
+            new_out = txt_out_dir.text().strip()
+
+            if new_source:
+                self.docs_dir = os.path.normpath(new_source)
+                self.config.setdefault("workspace", {})["docs_dir"] = self.docs_dir
+            if new_out:
+                self.config.setdefault("workspace", {})["dir"] = os.path.normpath(new_out)
+
+            self._save_config()
+            self._load_docs_list()
+            self._refresh_git_history()
+            self._append_log(f"Settings updated: Source Docs = '{self.docs_dir}', Workspace = '{new_out}'", "success")
+            QMessageBox.information(
+                self,
+                "Settings Saved",
+                f"Document paths successfully updated and applied!\n\n"
+                f"Source Docs: {self.docs_dir}\n"
+                f"Output Workspace: {new_out}\n\n"
+                f"All document lists have been refreshed."
+            )
+
+    def _open_urls_dialog(self):
+        """Open a dedicated modal dialog to view, edit, and test target service URLs."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Configure Target Service URLs & Test Agents")
+        dialog.setMinimumWidth(780)
+        dialog.setStyleSheet(self.styleSheet())
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        header = QLabel("<h3>🌐 Target Service URLs & Verification</h3>")
+        header.setStyleSheet("color: #58a6ff; margin-bottom: 2px;")
+        layout.addWidget(header)
+
+        desc = QLabel("Configure web endpoints and project library folders, and test each agent connection, prompt handling, and document synchronization:")
+        desc.setStyleSheet("color: #8b949e; font-size: 12px; margin-bottom: 6px;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignTop)
+
+        test_workers = []
+
+        def create_url_test_row(service_key: str, default_text: str, placeholder: str, btn_text: str = "🧪 Test Agent"):
+            row_widget = QWidget()
+            row_layout = QVBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(4)
+
+            top_row = QHBoxLayout()
+            top_row.setSpacing(8)
+
+            txt_edit = QLineEdit(default_text)
+            txt_edit.setPlaceholderText(placeholder)
+            txt_edit.setFixedHeight(30)
+            top_row.addWidget(txt_edit, 1)
+
+            btn_test = QPushButton(btn_text)
+            btn_test.setObjectName("btnSecondary")
+            btn_test.setFixedHeight(30)
+            btn_test.setMinimumWidth(125)
+            top_row.addWidget(btn_test)
+
+            row_layout.addLayout(top_row)
+
+            lbl_status = QLabel("")
+            lbl_status.setWordWrap(True)
+            lbl_status.setStyleSheet("color: #8b949e; font-size: 11px;")
+            row_layout.addWidget(lbl_status)
+
+            def on_test_clicked():
+                url = txt_edit.text().strip()
+                if not url:
+                    lbl_status.setText("❌ URL is empty. Please enter a valid URL.")
+                    lbl_status.setStyleSheet("color: #f85149; font-size: 11px; font-weight: bold;")
+                    return
+
+                btn_test.setEnabled(False)
+                btn_test.setText("⏳ Testing...")
+                lbl_status.setText("⏳ Connecting to browser and testing...")
+                lbl_status.setStyleSheet("color: #58a6ff; font-size: 11px;")
+
+                cfg = dict(self.config)
+                cfg.setdefault("browser", {})["use_existing_chrome"] = self.chk_use_existing_chrome.isChecked()
+                cfg.setdefault("services", {}).setdefault(service_key.replace("_lib", ""), {})["url"] = url
+
+                worker = AgentTestWorker(service_key=service_key, target_url=url, config=cfg)
+
+                def on_status(msg: str):
+                    lbl_status.setText(f"⏳ {msg}")
+                    self._append_log(f"[{service_key.upper()} Test] {msg}", "info")
+
+                def on_result(ok: bool, msg: str):
+                    btn_test.setEnabled(True)
+                    btn_test.setText(btn_text)
+                    if ok:
+                        lbl_status.setText(f"✅ {msg}")
+                        lbl_status.setStyleSheet("color: #3fb950; font-size: 11px; font-weight: bold;")
+                        self._append_log(f"[{service_key.upper()} Verified] {msg}", "success")
+                    else:
+                        lbl_status.setText(f"❌ {msg}")
+                        lbl_status.setStyleSheet("color: #f85149; font-size: 11px; font-weight: bold;")
+                        self._append_log(f"[{service_key.upper()} Failed] {msg}", "error")
+
+                worker.status_signal.connect(on_status)
+                worker.result_signal.connect(on_result)
+                worker.finished.connect(lambda: test_workers.remove(worker) if worker in test_workers else None)
+                test_workers.append(worker)
+                worker.start()
+
+            btn_test.clicked.connect(on_test_clicked)
+            return row_widget, txt_edit
+
+        # 1. ChatGPT
+        lbl_gpt = QLabel("ChatGPT URL:")
+        lbl_gpt.setStyleSheet("color: #10a37f; font-weight: bold;")
+        w_gpt, txt_gpt = create_url_test_row("chatgpt", self.txt_chatgpt_url.text(), "https://chatgpt.com/c/<conversation_id>", "🧪 Test Agent")
+        form.addRow(lbl_gpt, w_gpt)
+
+        # 2. ChatGPT Lib
+        lbl_gpt_lib = QLabel("ChatGPT Lib URL:")
+        lbl_gpt_lib.setStyleSheet("color: #10a37f; font-weight: bold;")
+        w_gpt_lib, txt_gpt_lib = create_url_test_row("chatgpt_lib", self.txt_chatgpt_lib_url.text(), "https://chatgpt.com/library/d/<folder_id>", "🧪 Test Lib Sync")
+        form.addRow(lbl_gpt_lib, w_gpt_lib)
+
+        # 3. NotebookLM
+        lbl_nb = QLabel("NotebookLM URL:")
+        lbl_nb.setStyleSheet("color: #58a6ff; font-weight: bold;")
+        w_nb, txt_nb = create_url_test_row("notebooklm", self.txt_notebooklm_url.text(), "https://notebook.google.com/notebook/<notebook_id>", "🧪 Test Agent & Sync")
+        form.addRow(lbl_nb, w_nb)
+
+        # 4. Gemini
+        lbl_gemini = QLabel("Gemini URL:")
+        lbl_gemini.setStyleSheet("color: #a78bfa; font-weight: bold;")
+        w_gemini, txt_gemini = create_url_test_row("gemini", self.txt_gemini_url.text(), "https://gemini.google.com/app", "🧪 Test Agent")
+        form.addRow(lbl_gemini, w_gemini)
+
+        # 5. Grok
+        lbl_grok = QLabel("Grok URL:")
+        lbl_grok.setStyleSheet("color: #f59e0b; font-weight: bold;")
+        w_grok, txt_grok = create_url_test_row("grok", self.txt_grok_url.text(), "https://grok.com/project/<project_id>", "🧪 Test Agent & Sync")
+        form.addRow(lbl_grok, w_grok)
+
+        # 6. Claude
+        lbl_claude = QLabel("Claude URL:")
+        lbl_claude.setStyleSheet("color: #d97706; font-weight: bold;")
+        w_claude, txt_claude = create_url_test_row("claude", self.txt_claude_url.text(), "https://claude.ai/chat/<chat_id>", "🧪 Test Agent")
+        form.addRow(lbl_claude, w_claude)
+
+        # 7. Copilot
+        lbl_copilot = QLabel("Copilot URL:")
+        lbl_copilot.setStyleSheet("color: #0284c7; font-weight: bold;")
+        w_copilot, txt_copilot = create_url_test_row("copilot", self.txt_copilot_url.text(), "https://copilot.microsoft.com/projects/<project_id>", "🧪 Test Agent")
+        form.addRow(lbl_copilot, w_copilot)
+
+        layout.addLayout(form)
+
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+
+        btn_save = QPushButton("Save & Close")
+        btn_save.setFixedHeight(34)
+        btn_save.setMinimumWidth(110)
+        btn_save.clicked.connect(dialog.accept)
+        btn_box.addWidget(btn_save)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setObjectName("btnSecondary")
+        btn_cancel.setFixedHeight(34)
+        btn_cancel.setMinimumWidth(80)
+        btn_cancel.clicked.connect(dialog.reject)
+        btn_box.addWidget(btn_cancel)
+
+        layout.addLayout(btn_box)
+
+        if dialog.exec() == QDialog.Accepted:
+            self.txt_chatgpt_url.setText(txt_gpt.text().strip())
+            self.txt_chatgpt_lib_url.setText(txt_gpt_lib.text().strip())
+            self.txt_notebooklm_url.setText(txt_nb.text().strip())
+            self.txt_gemini_url.setText(txt_gemini.text().strip())
+            self.txt_grok_url.setText(txt_grok.text().strip())
+            self.txt_claude_url.setText(txt_claude.text().strip())
+            self.txt_copilot_url.setText(txt_copilot.text().strip())
+            self._auto_save_prompts()
+            self._append_log("Target service URLs updated and saved.", "success")
+
 
     def _refresh_git_history(self):
         repo_mgr = WorkspaceRepoManager(
@@ -1706,34 +2771,55 @@ class MainWindow(QMainWindow):
             if not os.path.exists(fpath):
                 QMessageBox.critical(self, "File Not Found", f"Cannot find document at: {fpath}")
                 return
-            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                doc_content = f.read()
-        else:
-            user_input = self.txt_concept.toPlainText().strip()
-            if not user_input:
-                QMessageBox.warning(self, "Empty Prompt", "Please enter architecture requirements.")
-                return
+        doc_filename = ""
+        doc_content = ""
 
         if is_plan_mode:
+            current_item = self.list_plan_docs.currentItem()
+            if current_item:
+                doc_filename = current_item.data(Qt.UserRole)
+                fpath = os.path.join(self.docs_dir, doc_filename)
+                if os.path.exists(fpath):
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                        doc_content = f.read()
+
             stage1_prompt = self.txt_plan_chatgpt1_prompt.toPlainText().strip()
             prompt_gemini = self.txt_plan_gemini_prompt.toPlainText().strip()
             stage2_prompt = self.txt_plan_notebooklm_prompt.toPlainText().strip()
             stage3_prompt = self.txt_plan_chatgpt_final_prompt.toPlainText().strip()
+            iterations = self.combo_iterations.currentIndex() + 1
         elif is_doc_mode:
+            current_item = self.list_docs.currentItem()
+            if current_item:
+                doc_filename = current_item.data(Qt.UserRole)
+                fpath = os.path.join(self.docs_dir, doc_filename)
+                if os.path.exists(fpath):
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                        doc_content = f.read()
+
             stage1_prompt = self.txt_doc_stage1_prompt.toPlainText().strip()
-            prompt_gemini = ""
+            prompt_gemini = self.txt_prompt_gemini.toPlainText().strip()
             stage2_prompt = self.txt_doc_stage2_prompt.toPlainText().strip()
             stage3_prompt = self.txt_doc_stage3_prompt.toPlainText().strip()
+            iterations = 1
         else:
+            user_input = self.txt_concept.toPlainText().strip()
+            if not user_input:
+                QMessageBox.warning(self, "Empty Concept", "Please enter a system concept in the text box.")
+                return
+
             stage1_prompt = self.txt_concept_stage1_prompt.toPlainText().strip()
-            prompt_gemini = ""
+            prompt_gemini = self.txt_prompt_gemini.toPlainText().strip()
             stage2_prompt = self.txt_concept_stage2_prompt.toPlainText().strip()
             stage3_prompt = self.txt_doc_stage3_prompt.toPlainText().strip()
-
+            iterations = 1
 
         if not is_plan_mode and not stage1_prompt:
             QMessageBox.warning(self, "Empty Stage 1 Prompt", "Please enter a prompt for Stage 1 (ChatGPT).")
             return
+
+        # Save all current prompts and agent dropdown selections
+        self._auto_save_prompts()
 
         # Prepare updated config
         cfg = dict(self.config)
@@ -1742,11 +2828,13 @@ class MainWindow(QMainWindow):
         cfg.setdefault("services", {}).setdefault("notebooklm", {})["url"] = self.txt_notebooklm_url.text().strip()
         cfg.setdefault("services", {}).setdefault("gemini", {})["url"] = self.txt_gemini_url.text().strip()
         cfg.setdefault("services", {}).setdefault("grok", {})["url"] = self.txt_grok_url.text().strip()
+        cfg.setdefault("services", {}).setdefault("claude", {})["url"] = self.txt_claude_url.text().strip()
+        cfg.setdefault("services", {}).setdefault("copilot", {})["url"] = self.txt_copilot_url.text().strip()
 
         self.btn_run.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.progress_bar.setValue(0)
-        self.output_tabs.setCurrentIndex(3)  # Switch to execution log
+        self.output_tabs.setCurrentWidget(self.txt_log)  # Switch to Live Execution Log
 
         mode_desc = f"Tri-Model Plan Refinement ({iterations} iterations)" if is_plan_mode else "Stage 1: ChatGPT | Stage 2: NotebookLM | Stage 3: ChatGPT"
         self._append_log(f"Starting orchestration session ({mode_desc})...", "info")
@@ -1766,8 +2854,13 @@ class MainWindow(QMainWindow):
             chatgpt_lib_url=self.txt_chatgpt_lib_url.text().strip(),
             gemini_url=self.txt_gemini_url.text().strip(),
             grok_url=self.txt_grok_url.text().strip(),
+            claude_url=self.txt_claude_url.text().strip(),
+            copilot_url=self.txt_copilot_url.text().strip(),
             max_iterations=iterations,
-
+            plan_agent1=self.combo_plan_agent1.currentText() if hasattr(self, "combo_plan_agent1") else "ChatGPT",
+            plan_agent2=self.combo_plan_agent2.currentText() if hasattr(self, "combo_plan_agent2") else "Gemini",
+            plan_agent3=self.combo_plan_agent3.currentText() if hasattr(self, "combo_plan_agent3") else "NotebookLM",
+            plan_agent4=self.combo_plan_agent4.currentText() if hasattr(self, "combo_plan_agent4") else "ChatGPT",
             is_plan_mode=is_plan_mode,
             auto_freeze=self.chk_auto_freeze.isChecked(),
             fresh_session=self.chk_fresh_session.isChecked(),
@@ -1782,6 +2875,177 @@ class MainWindow(QMainWindow):
         self.worker.finished_signal.connect(self._on_orchestration_finished)
 
         self.worker.start()
+
+    def _select_all_broadcast_agents(self, select_all: bool):
+        """Quick toggle to select or deselect all broadcast agent checkboxes."""
+        if hasattr(self, "chk_agent_chatgpt"):
+            self.chk_agent_chatgpt.setChecked(select_all)
+            self.chk_agent_notebooklm.setChecked(select_all)
+            self.chk_agent_gemini.setChecked(select_all)
+            self.chk_agent_grok.setChecked(select_all)
+            self.chk_agent_claude.setChecked(select_all)
+            self.chk_agent_copilot.setChecked(select_all)
+            self._auto_save_prompts()
+
+    def _start_broadcast_prompt(self):
+        """Submit the broadcast prompt to all selected AI agents in Tab 4."""
+        prompt = self.txt_broadcast_prompt.toPlainText().strip()
+        if not prompt:
+            QMessageBox.warning(self, "Empty Prompt", "Please enter a prompt to broadcast.")
+            return
+
+        selected_agents = []
+        if self.chk_agent_chatgpt.isChecked():
+            selected_agents.append("ChatGPT")
+        if self.chk_agent_notebooklm.isChecked():
+            selected_agents.append("NotebookLM")
+        if self.chk_agent_gemini.isChecked():
+            selected_agents.append("Gemini")
+        if self.chk_agent_grok.isChecked():
+            selected_agents.append("Grok")
+        if self.chk_agent_claude.isChecked():
+            selected_agents.append("Claude")
+        if self.chk_agent_copilot.isChecked():
+            selected_agents.append("Copilot")
+
+        if not selected_agents:
+            QMessageBox.warning(self, "No Agents Selected", "Please select at least one AI agent to receive the prompt.")
+            return
+
+        # Check attached F-document and checkbox
+        selected_doc_item = self.list_broadcast_docs.currentItem() if hasattr(self, "list_broadcast_docs") else None
+        selected_doc_name = selected_doc_item.data(Qt.UserRole) if selected_doc_item else "None"
+        should_attach = self.chk_attach_doc_content.isChecked() if hasattr(self, "chk_attach_doc_content") else True
+
+        effective_prompt = prompt
+        doc_header = ""
+        if should_attach and selected_doc_name and selected_doc_name != "None":
+            # Search in docs_dir or workspace
+            fpath = os.path.join(self.docs_dir, selected_doc_name)
+            if not os.path.exists(fpath):
+                fpath = os.path.join(self.config.get("workspace", {}).get("dir", "./workspace"), selected_doc_name)
+
+            doc_content = ""
+            if os.path.exists(fpath):
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    doc_content = f.read().strip()
+
+            if doc_content:
+                # Prompt description in the box is the first part, second is entire selected doc
+                effective_prompt = f"{prompt}\n\n---\n\n## Document: {selected_doc_name}\n\n```markdown\n{doc_content}\n```"
+            else:
+                effective_prompt = f"{prompt}\n\n---\n\n## Document: {selected_doc_name}"
+            doc_header = selected_doc_name
+
+        self._auto_save_prompts()
+
+        # Update UI Controls
+        self.btn_broadcast_submit.setEnabled(False)
+        self.btn_broadcast_stop.setEnabled(True)
+        self.btn_broadcast_download.setEnabled(False)
+        self.btn_run.setEnabled(False)
+        self.btn_run_stage2_only.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.progress_bar.setValue(0)
+
+        # Clear and prepare Recommendations & Multi-Agent Responses view
+        doc_sub = f"\n**Attached Document:** `{selected_doc_name}`\n" if (should_attach and selected_doc_name != "None") else ""
+        init_md = (
+            f"# 🚀 Multi-Agent Recommendations & Responses\n\n"
+            f"**Broadcasting to:** {', '.join(selected_agents)}{doc_sub}\n\n"
+            f"**Prompt:**\n> {prompt}\n\n"
+            f"---\n\n"
+            f"⏳ *Broadcasting in progress... Responses will appear below live one by one as each agent finishes.*\n"
+        )
+        self.txt_output_recommendations.setMarkdown(init_md)
+        self.txt_output_broadcast.setMarkdown(init_md)
+        self.output_tabs.setCurrentWidget(self.txt_output_recommendations)  # Switch to Recommendations tab immediately
+
+        self._append_log(f"Starting Multi-Agent Broadcast to {len(selected_agents)} agents: {', '.join(selected_agents)} (Attached Doc: {selected_doc_name if should_attach else 'None'})...", "info")
+
+        self.last_broadcast_md = ""
+        self.last_broadcast_file = ""
+
+        self.broadcast_worker = BroadcastWorker(
+            prompt=effective_prompt,
+            user_prompt=prompt,
+            doc_name=doc_header,
+            selected_agents=selected_agents,
+            config=self.config
+        )
+        self.broadcast_worker.status_signal.connect(self.status_bar.showMessage)
+        self.broadcast_worker.progress_signal.connect(self.progress_bar.setValue)
+        self.broadcast_worker.log_signal.connect(self._append_log)
+        self.broadcast_worker.agent_response_signal.connect(self._on_broadcast_agent_response)
+        self.broadcast_worker.finished_signal.connect(self._on_broadcast_finished)
+        self.broadcast_worker.start()
+
+    def _stop_broadcast(self):
+        """Cancel the active broadcast process."""
+        if hasattr(self, "broadcast_worker") and self.broadcast_worker and self.broadcast_worker.isRunning():
+            self._append_log("Stopping Multi-Agent Broadcast...", "warning")
+            self.broadcast_worker.cancel()
+            self.btn_broadcast_stop.setEnabled(False)
+            self.status_bar.showMessage("Broadcast stopping...")
+
+    def _on_broadcast_agent_response(self, agent_name: str, response_text: str):
+        """Append agent's reply live to Recommendations and Multi-Agent Responses tabs as they arrive."""
+        for target_widget in [self.txt_output_recommendations, self.txt_output_broadcast]:
+            current_md = target_widget.toMarkdown()
+            if "⏳ *Broadcasting in progress..." in current_md:
+                current_md = current_md.replace("⏳ *Broadcasting in progress... Responses will appear below live one by one as each agent finishes.*", "")
+            if "*Waiting for responses...*" in current_md:
+                current_md = current_md.replace("*Waiting for responses...*", "")
+            current_md += f"\n\n# 🤖 {agent_name} Response\n\n{response_text.strip()}\n\n---\n"
+            target_widget.setMarkdown(current_md)
+            target_widget.moveCursor(QTextCursor.End)
+
+    def _on_broadcast_finished(self, success: bool, full_markdown: str, file_path: str):
+        """Handler when multi-agent broadcast completes."""
+        self.btn_broadcast_submit.setEnabled(True)
+        self.btn_broadcast_stop.setEnabled(False)
+        self.btn_run.setEnabled(True)
+        self.btn_run_stage2_only.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+
+        if success:
+            self.last_broadcast_md = full_markdown
+            self.last_broadcast_file = file_path
+            self.btn_broadcast_download.setEnabled(True)
+            self.txt_output_recommendations.setMarkdown(full_markdown)
+            self.txt_output_broadcast.setMarkdown(full_markdown)
+            self.output_tabs.setCurrentWidget(self.txt_output_recommendations)  # Keep Recommendations active
+            self._append_log(f"Multi-Agent Broadcast completed! Saved to {os.path.basename(file_path)}", "success")
+            QMessageBox.information(
+                self,
+                "Broadcast Complete",
+                f"Successfully received replies from all selected agents!\n\nSaved to:\n{file_path}\n\nYou can view full responses in the 'Recommendations' tab or click Download."
+            )
+        else:
+            self._append_log(f"Multi-Agent Broadcast ended: {full_markdown}", "error")
+            QMessageBox.warning(self, "Broadcast Incomplete", f"Broadcast finished with issues:\n{full_markdown}")
+
+    def _download_broadcast_response(self):
+        """Save/Export the aggregated responses markdown to user-chosen location."""
+        if not hasattr(self, "last_broadcast_md") or not self.last_broadcast_md:
+            QMessageBox.warning(self, "No Data", "No broadcast responses available to export.")
+            return
+
+        default_name = os.path.basename(self.last_broadcast_file) if hasattr(self, "last_broadcast_file") and self.last_broadcast_file else f"BROADCAST_RESPONSES_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Multi-Agent Broadcast Responses",
+            os.path.join(self.config.get("workspace", {}).get("dir", "./workspace"), default_name),
+            "Markdown Files (*.md);;All Files (*)"
+        )
+        if save_path:
+            try:
+                with open(save_path, "w", encoding="utf-8") as f:
+                    f.write(self.last_broadcast_md)
+                self._append_log(f"Exported broadcast responses to: {save_path}", "success")
+                QMessageBox.information(self, "Export Successful", f"Responses saved to:\n{save_path}")
+            except Exception as e_exp:
+                QMessageBox.critical(self, "Export Error", f"Failed to save file:\n{e_exp}")
 
     def _start_stage2_only_orchestration(self):
         """Execute Stage 2 NotebookLM review independently using the latest document or selected file."""
@@ -1825,7 +3089,7 @@ class MainWindow(QMainWindow):
         self.btn_run_stage2_only.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.progress_bar.setValue(0)
-        self.output_tabs.setCurrentIndex(3)  # Switch to execution log
+        self.output_tabs.setCurrentWidget(self.txt_log)  # Switch to Live Execution Log
 
         self._append_log("Starting Stage 2 Only (NotebookLM Cross-Document Evaluation)...", "info")
 
@@ -1856,6 +3120,8 @@ class MainWindow(QMainWindow):
 
     def _stop_orchestration(self):
 
+        if hasattr(self, "broadcast_worker") and self.broadcast_worker and self.broadcast_worker.isRunning():
+            self._stop_broadcast()
         if self.worker and self.worker.isRunning():
             self._append_log("Stopping orchestration session...", "warning")
             self.worker.cancel()
