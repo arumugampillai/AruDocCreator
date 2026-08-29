@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import site
 import subprocess
 import sys
@@ -88,6 +89,8 @@ class BrowserAutomator:
         self.gemini_url = services_cfg.get("gemini", {}).get("url", "https://gemini.google.com/app")
         self.notebooklm_url = services_cfg.get("notebooklm", {}).get("url", "https://notebooklm.google.com")
         self.grok_url = services_cfg.get("grok", {}).get("url", "https://grok.com/project/3a4c5217-9801-44e6-bb35-60f7e17eca21")
+        self.claude_url = services_cfg.get("claude", {}).get("url", "https://claude.ai/chat/bccf1a06-ab09-483d-8681-1d6682d682f7")
+        self.copilot_url = services_cfg.get("copilot", {}).get("url", "https://copilot.microsoft.com/projects/WYSvbmQqZXZMk49sA4Dr5")
 
         self.playwright: Any = None
         self.browser: Any = None
@@ -96,6 +99,8 @@ class BrowserAutomator:
         self.gemini_page: Any = None
         self.notebooklm_page: Any = None
         self.grok_page: Any = None
+        self.claude_page: Any = None
+        self.copilot_page: Any = None
         self.is_cdp_connected: bool = False
 
 
@@ -772,11 +777,10 @@ class BrowserAutomator:
             "button[aria-label*='Submit']",
             "button.send-button",
             "button mat-icon:has-text('send')",
-            "button:has(svg)",
         ]
         sent = False
         for s_sel in send_selectors:
-            btn = page.locator(s_sel)
+            btn = page.locator(s_sel).first
             if await btn.count() > 0 and await btn.is_enabled():
                 await btn.click()
                 sent = True
@@ -836,20 +840,17 @@ class BrowserAutomator:
                 return ""
             return await page.evaluate("""() => {
                 const selectors = [
+                    'div.message-bubble.w-full',
+                    'div.message-bubble:not(.rounded-br-lg):not([class*="user-bubble"])',
                     'div[data-message-author="assistant"]',
-                    'div.message-bubble',
-                    '.response-bubble',
-                    '.prose',
-                    'div.markdown',
-                    'div[class*="response"]',
-                    'div[class*="message"]'
+                    '.response-bubble'
                 ];
                 for (const sel of selectors) {
-                    const containers = document.querySelectorAll(sel);
+                    const containers = Array.from(document.querySelectorAll(sel));
                     if (containers.length > 0) {
                         const last = containers[containers.length - 1];
                         const txt = last.innerText ? last.innerText.trim() : "";
-                        if (txt.length > 5) return txt;
+                        if (txt.length > 0) return txt;
                     }
                 }
                 return "";
@@ -869,7 +870,6 @@ class BrowserAutomator:
         target_url = (grok_url or self.grok_url).strip()
 
         if not self.grok_page or self.grok_page.is_closed():
-            # Check if there is already an open Grok tab
             for p in self.context.pages:
                 if "grok.com" in p.url:
                     self.grok_page = p
@@ -884,20 +884,20 @@ class BrowserAutomator:
 
             if target_url not in self.grok_page.url:
                 await self.grok_page.goto(target_url, wait_until="domcontentloaded")
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(2.0)
         elif new_chat or (target_url and target_url not in self.grok_page.url):
             await self.grok_page.goto(target_url, wait_until="domcontentloaded")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)
 
         page = self.grok_page
         await page.bring_to_front()
 
         input_selectors = [
+            "div[contenteditable='true'].ProseMirror",
+            "div[contenteditable='true']",
             "textarea[placeholder*='Ask']",
             "textarea[placeholder*='Grok']",
             "textarea",
-            "div[contenteditable='true']",
-            "rich-textarea div[contenteditable='true']",
         ]
 
         target_input = None
@@ -906,23 +906,37 @@ class BrowserAutomator:
                 target_input = sel
                 break
 
-        # Record prior state before sending prompt so we extract ONLY the NEW reply
+        # Record prior state before sending prompt
         prior_turn_count = await page.evaluate(
-            "() => document.querySelectorAll('div[data-message-author=\"assistant\"], div.message-bubble, .response-bubble').length"
+            "() => document.querySelectorAll('div.message-bubble.w-full, div.message-bubble:not(.rounded-br-lg), div[data-message-author=\"assistant\"]').length"
         )
         prior_text = await self._extract_grok_latest_response(page)
 
+        # Dismiss any open overlays or dropdown menus
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.3)
+
         logger.info(f"Injecting critique prompt into Grok (Prior text: {len(prior_text)} chars)...")
-        await self._safe_input_text(page, target_input, prompt)
+        input_elem = page.locator(target_input).first if target_input else page.locator("div[contenteditable='true']").first
+        try:
+            await input_elem.click(timeout=3000)
+        except Exception:
+            await page.keyboard.press("Escape")
+            await input_elem.click(force=True)
+
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
+        await page.keyboard.insert_text(prompt)
+        await asyncio.sleep(0.5)
 
         send_selectors = [
             "button[aria-label*='Send']",
             "button[type='submit']",
-            "button:has(svg)",
+            "button[data-testid*='send']",
         ]
         sent = False
         for s_sel in send_selectors:
-            btn = page.locator(s_sel)
+            btn = page.locator(s_sel).first
             if await btn.count() > 0 and await btn.is_enabled():
                 await btn.click()
                 sent = True
@@ -933,9 +947,9 @@ class BrowserAutomator:
 
         # Step 1: Wait for Grok to start generating NEW response
         logger.info("Waiting for Grok response generation to start...")
-        for _ in range(25):
+        for _ in range(30):
             cur_turn_count = await page.evaluate(
-                "() => document.querySelectorAll('div[data-message-author=\"assistant\"], div.message-bubble, .response-bubble').length"
+                "() => document.querySelectorAll('div.message-bubble.w-full, div.message-bubble:not(.rounded-br-lg), div[data-message-author=\"assistant\"]').length"
             )
             cur_text = await self._extract_grok_latest_response(page)
             if cur_turn_count > prior_turn_count or (cur_text and cur_text != prior_text):
@@ -950,9 +964,13 @@ class BrowserAutomator:
         timeout_seconds = 180
 
         while time.time() - start_time < timeout_seconds:
+            is_streaming = await page.locator("button[aria-label*='Stop'], button:has-text('Stop')").count() > 0
             current_text = await self._extract_grok_latest_response(page)
-            if current_text and len(current_text.strip()) > 0 and current_text != prior_text:
-                if current_text == last_text:
+            cur_turn_count = await page.evaluate(
+                "() => document.querySelectorAll('div.message-bubble.w-full, div.message-bubble:not(.rounded-br-lg), div[data-message-author=\"assistant\"]').length"
+            )
+            if current_text and len(current_text.strip()) > 0 and (current_text != prior_text or cur_turn_count > prior_turn_count):
+                if current_text == last_text and not is_streaming:
                     if stable_since is None:
                         stable_since = time.time()
                     elif time.time() - stable_since >= self.stream_settle_timeout:
@@ -966,10 +984,342 @@ class BrowserAutomator:
 
             await asyncio.sleep(self.stream_poll_interval)
 
-        if last_text and last_text != prior_text:
+        if last_text and (last_text != prior_text or cur_turn_count > prior_turn_count):
             return last_text.strip()
         return current_text.strip() if (current_text and current_text != prior_text) else ""
 
+    async def _extract_claude_latest_response(self, page: Any) -> str:
+        """Extract latest assistant response from Claude AI chat."""
+        try:
+            if page.is_closed():
+                return ""
+            return await page.evaluate("""() => {
+                const selectors = [
+                    "div.standard-markdown",
+                    "div.font-claude-message",
+                    "div[class*='font-claude-message']",
+                    "div.prose",
+                    "[data-testid='chat-message']:not([data-testid*='user'])"
+                ];
+                for (const sel of selectors) {
+                    const elements = Array.from(document.querySelectorAll(sel));
+                    if (elements.length > 0) {
+                        const last = elements[elements.length - 1];
+                        const text = (last.innerText || '').trim();
+                        if (text) return text;
+                    }
+                }
+                return "";
+            }""")
+        except Exception as e:
+            logger.debug(f"Error extracting Claude response: {e}")
+            return ""
+
+    async def query_claude(
+        self, prompt: str, new_chat: bool = False, claude_url: Optional[str] = None
+    ) -> str:
+        """
+        Send a prompt to Claude AI for architecture critique / refinement and extract response.
+        """
+        if not self.context:
+            await self.start()
+
+        target_url = (claude_url or self.claude_url).strip()
+
+        if not self.claude_page or self.claude_page.is_closed():
+            for p in self.context.pages:
+                if "claude.ai" in p.url:
+                    self.claude_page = p
+                    break
+            if not self.claude_page:
+                for p in self.context.pages:
+                    if p != self.chatgpt_page and p != self.notebooklm_page and p != self.gemini_page and p != self.grok_page and ("about:blank" in p.url or "chrome://" in p.url or "newtab" in p.url):
+                        self.claude_page = p
+                        break
+            if not self.claude_page:
+                self.claude_page = await self.context.new_page()
+
+            if target_url not in self.claude_page.url:
+                await self.claude_page.goto(target_url, wait_until="domcontentloaded")
+                await asyncio.sleep(2.0)
+        elif new_chat or (target_url and target_url not in self.claude_page.url):
+            await self.claude_page.goto(target_url, wait_until="domcontentloaded")
+            await asyncio.sleep(2.0)
+
+        page = self.claude_page
+        await page.bring_to_front()
+
+        # Check for login screen
+        if "login" in page.url or "auth" in page.url:
+            logger.warning("Claude login screen detected. Please complete login in Chrome...")
+            for _ in range(120):
+                if "login" not in page.url and "auth" not in page.url and "claude.ai" in page.url:
+                    break
+                await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)
+
+        input_selectors = [
+            "div[contenteditable='true'].ProseMirror",
+            "div[role='textbox']",
+            "div[aria-label*='Write your prompt']",
+            "div[contenteditable='true']",
+            "textarea",
+        ]
+
+        target_input = None
+        for sel in input_selectors:
+            if await page.locator(sel).count() > 0:
+                target_input = sel
+                break
+
+        prior_count = await page.evaluate(
+            "() => document.querySelectorAll('div.standard-markdown, div.font-claude-message, div.prose').length"
+        )
+        prior_text = await self._extract_claude_latest_response(page)
+
+        logger.info(f"Injecting critique prompt into Claude (Prior text: {len(prior_text)} chars)...")
+        
+        input_elem = page.locator(target_input).first if target_input else page.locator("div[contenteditable='true']").first
+        await input_elem.click()
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
+        await page.keyboard.insert_text(prompt)
+        await asyncio.sleep(0.5)
+
+        send_selectors = [
+            "button[aria-label*='Send message']",
+            "button[aria-label*='Send Message']",
+            "button:has-text('Send')",
+            "button[data-testid*='send']",
+        ]
+        sent = False
+        for s_sel in send_selectors:
+            btn = page.locator(s_sel).first
+            if await btn.count() > 0 and await btn.is_enabled():
+                await btn.click()
+                sent = True
+                break
+
+        if not sent:
+            await page.keyboard.press("Enter")
+
+        # Step 1: Wait for Claude response generation to start
+        logger.info("Waiting for Claude response generation to start...")
+        for _ in range(30):
+            cur_count = await page.evaluate(
+                "() => document.querySelectorAll('div.standard-markdown, div.font-claude-message, div.prose').length"
+            )
+            cur_text = await self._extract_claude_latest_response(page)
+            if cur_count > prior_count or (cur_text and cur_text != prior_text):
+                break
+            await asyncio.sleep(0.4)
+
+        # Step 2: Wait for Claude response to fully stream and stabilize
+        logger.info("Waiting for Claude critique response to stabilize...")
+        start_time = time.time()
+        last_text = ""
+        stable_since: Optional[float] = None
+        timeout_seconds = 180
+
+        while time.time() - start_time < timeout_seconds:
+            is_streaming = await page.locator("button[aria-label*='Stop'], button:has-text('Stop')").count() > 0
+            current_text = await self._extract_claude_latest_response(page)
+            cur_count = await page.evaluate(
+                "() => document.querySelectorAll('div.standard-markdown, div.font-claude-message, div.prose').length"
+            )
+            if current_text and len(current_text.strip()) > 0 and (current_text != prior_text or cur_count > prior_count):
+                if current_text == last_text and not is_streaming:
+                    if stable_since is None:
+                        stable_since = time.time()
+                    elif time.time() - stable_since >= self.stream_settle_timeout:
+                        logger.info(f"Extracted new Claude critique ({len(current_text)} chars).")
+                        return current_text.strip()
+                else:
+                    last_text = current_text
+                    stable_since = None
+            else:
+                stable_since = None
+
+            await asyncio.sleep(self.stream_poll_interval)
+
+        if last_text and (last_text != prior_text or cur_count > prior_count):
+            return last_text.strip()
+        return current_text.strip() if (current_text and (current_text != prior_text or cur_count > prior_count)) else ""
+
+    async def _extract_copilot_latest_response(self, page: Any) -> str:
+        """Extract latest assistant response from Microsoft Copilot chat."""
+        try:
+            if page.is_closed():
+                return ""
+            raw_text = await page.evaluate("""() => {
+                const selectors = [
+                    "[data-content='ai-message']",
+                    "div[class*='font-copilot-message']",
+                    "div.response-content",
+                    "div[data-testid*='message']",
+                    "div.prose",
+                    "div.markdown"
+                ];
+                for (const sel of selectors) {
+                    const elements = Array.from(document.querySelectorAll(sel));
+                    if (elements.length > 0) {
+                        const last = elements[elements.length - 1];
+                        const text = (last.innerText || '').trim();
+                        if (text) return text;
+                    }
+                }
+                return "";
+            }""")
+            if not raw_text:
+                return ""
+            # Clean Copilot metadata artifacts
+            cleaned = raw_text.strip()
+            if cleaned.startswith("Copilot said"):
+                cleaned = cleaned[len("Copilot said"):].strip()
+            cleaned = re.sub(r"\n\s*Edit in a page\s*$", "", cleaned, flags=re.IGNORECASE).strip()
+            return cleaned
+        except Exception as e:
+            logger.debug(f"Error extracting Copilot response: {e}")
+            return ""
+
+    async def query_copilot(
+        self, prompt: str, new_chat: bool = False, copilot_url: Optional[str] = None
+    ) -> str:
+        """
+        Send a prompt to Microsoft Copilot for architecture critique / refinement and extract response.
+        """
+        if not self.context:
+            await self.start()
+
+        target_url = (copilot_url or self.copilot_url).strip()
+
+        if not self.copilot_page or self.copilot_page.is_closed():
+            for p in self.context.pages:
+                if "copilot.microsoft.com" in p.url:
+                    self.copilot_page = p
+                    break
+            if not self.copilot_page:
+                for p in self.context.pages:
+                    if p != self.chatgpt_page and p != self.notebooklm_page and p != self.gemini_page and p != self.grok_page and p != self.claude_page and ("about:blank" in p.url or "chrome://" in p.url or "newtab" in p.url):
+                        self.copilot_page = p
+                        break
+            if not self.copilot_page:
+                self.copilot_page = await self.context.new_page()
+
+            if target_url not in self.copilot_page.url:
+                await self.copilot_page.goto(target_url, wait_until="domcontentloaded")
+                await asyncio.sleep(2.5)
+        elif new_chat or (target_url and target_url not in self.copilot_page.url):
+            await self.copilot_page.goto(target_url, wait_until="domcontentloaded")
+            await asyncio.sleep(2.5)
+
+        page = self.copilot_page
+        await page.bring_to_front()
+
+        # Check for login screen
+        if "login" in page.url or "auth" in page.url or "signin" in page.url:
+            logger.warning("Copilot login screen detected. Please complete login in Chrome...")
+            for _ in range(120):
+                if "login" not in page.url and "auth" not in page.url and "copilot.microsoft.com" in page.url:
+                    break
+                await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)
+
+        # Dismiss any overlays
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.3)
+
+        input_selectors = [
+            "#userInput",
+            "textarea[placeholder*='Message Copilot']",
+            "textarea[placeholder*='Copilot']",
+            "textarea",
+            "div[contenteditable='true']",
+        ]
+
+        target_input = None
+        for sel in input_selectors:
+            if await page.locator(sel).count() > 0:
+                target_input = sel
+                break
+
+        prior_count = await page.evaluate(
+            "() => document.querySelectorAll('[data-content=\"ai-message\"]').length"
+        )
+        prior_text = await self._extract_copilot_latest_response(page)
+
+        logger.info(f"Injecting critique prompt into Copilot (Prior text: {len(prior_text)} chars)...")
+        input_elem = page.locator(target_input).first if target_input else page.locator("#userInput").first
+        try:
+            await input_elem.click(timeout=3000)
+        except Exception:
+            await page.keyboard.press("Escape")
+            await input_elem.click(force=True)
+
+        await page.keyboard.press("Control+A")
+        await page.keyboard.press("Backspace")
+        await page.keyboard.insert_text(prompt)
+        await asyncio.sleep(0.5)
+
+        send_selectors = [
+            "button[aria-label*='Submit message']",
+            "button[aria-label*='Send']",
+            "button[title*='Submit message']",
+            "button[title*='Send']",
+        ]
+        sent = False
+        for s_sel in send_selectors:
+            btn = page.locator(s_sel).first
+            if await btn.count() > 0 and await btn.is_enabled():
+                await btn.click()
+                sent = True
+                break
+
+        if not sent:
+            await page.keyboard.press("Enter")
+
+        # Step 1: Wait for Copilot response generation to start
+        logger.info("Waiting for Copilot response generation to start...")
+        for _ in range(30):
+            cur_count = await page.evaluate(
+                "() => document.querySelectorAll('[data-content=\"ai-message\"]').length"
+            )
+            cur_text = await self._extract_copilot_latest_response(page)
+            if cur_count > prior_count or (cur_text and cur_text != prior_text):
+                break
+            await asyncio.sleep(0.4)
+
+        # Step 2: Wait for Copilot response to fully stream and stabilize
+        logger.info("Waiting for Copilot critique response to stabilize...")
+        start_time = time.time()
+        last_text = ""
+        stable_since: Optional[float] = None
+        timeout_seconds = 180
+
+        while time.time() - start_time < timeout_seconds:
+            is_streaming = await page.locator("button[aria-label*='Stop'], button:has-text('Stop')").count() > 0
+            current_text = await self._extract_copilot_latest_response(page)
+            cur_count = await page.evaluate(
+                "() => document.querySelectorAll('[data-content=\"ai-message\"]').length"
+            )
+            if current_text and len(current_text.strip()) > 0 and (current_text != prior_text or cur_count > prior_count):
+                if current_text == last_text and not is_streaming:
+                    if stable_since is None:
+                        stable_since = time.time()
+                    elif time.time() - stable_since >= self.stream_settle_timeout:
+                        logger.info(f"Extracted new Copilot critique ({len(current_text)} chars).")
+                        return current_text.strip()
+                else:
+                    last_text = current_text
+                    stable_since = None
+            else:
+                stable_since = None
+
+            await asyncio.sleep(self.stream_poll_interval)
+
+        if last_text and (last_text != prior_text or cur_count > prior_count):
+            return last_text.strip()
+        return current_text.strip() if (current_text and (current_text != prior_text or cur_count > prior_count)) else ""
 
     async def _extract_notebooklm_latest_response(self, page: Any) -> str:
         """Extract latest assistant response from NotebookLM chat, ignoring temporary thinking placeholders and user messages."""
@@ -1363,6 +1713,201 @@ class BrowserAutomator:
                 return False
         except Exception as e_up:
             logger.warning(f"ChatGPT library file upload exception: {e_up}. Continuing...")
+            return False
+
+    async def remove_old_grok_project_files(self, page: Any, new_doc_name: str) -> int:
+        """Scans Grok Project files list and removes previous versions/duplicates of this document."""
+        import re
+        base_prefix = re.sub(r"[-_\.]v\d+(?:\.\d+)*.*$", "", new_doc_name, flags=re.IGNORECASE).strip()
+        if not base_prefix or len(base_prefix) < 3:
+            return 0
+
+        logger.info(f"Checking Grok Project for outdated versions/duplicates of '{base_prefix}'...")
+        removed_count = 0
+        try:
+            for _ in range(12):
+                # Search for matching action buttons in Grok Project file tree
+                buttons = page.locator(f"button[aria-label*='Actions for {base_prefix}']")
+                count = await buttons.count()
+                if count <= 1:
+                    break
+
+                target_btn = None
+                for i in range(count):
+                    b = buttons.nth(i)
+                    aria = (await b.get_attribute("aria-label") or "").lower()
+                    if "(" in aria or new_doc_name.lower() not in aria:
+                        target_btn = b
+                        break
+
+                if not target_btn:
+                    target_btn = buttons.nth(1)
+
+                parent = target_btn.locator("xpath=..")
+                await parent.scroll_into_view_if_needed()
+                await parent.hover()
+                await asyncio.sleep(0.3)
+
+                await page.evaluate("""(el) => {
+                    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+                    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                }""", await target_btn.element_handle())
+                await asyncio.sleep(0.5)
+
+                del_option = page.locator("div[role='menuitem']:has-text('Delete'), [role='menuitem']:has-text('Delete'), button:has-text('Delete')")
+                if await del_option.count() > 0 and await del_option.first.is_visible():
+                    await del_option.first.click(force=True)
+                    await asyncio.sleep(0.5)
+
+                    confirm_btn = page.locator("div[role='dialog'] button:has-text('Delete'), button.btn-danger, button:has-text('Delete')")
+                    if await confirm_btn.count() > 0 and await confirm_btn.first.is_visible():
+                        await confirm_btn.first.click(force=True)
+                    removed_count += 1
+                    logger.info(f"Successfully deleted outdated Grok project file #{removed_count}.")
+                    await asyncio.sleep(2.0)
+                else:
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.5)
+                    break
+        except Exception as e_del:
+            logger.debug(f"Grok project old version removal non-fatal: {e_del}")
+        return removed_count
+
+    async def delete_file_from_grok_project(self, project_url: str, doc_name: str) -> bool:
+        """Deletes a specific named file from a Grok Project."""
+        if not self.context:
+            await self.start()
+
+        target_url = (project_url or self.grok_url or "https://grok.com/project/3a4c5217-9801-44e6-bb35-60f7e17eca21").strip()
+        
+        page = None
+        for p in self.context.pages:
+            if "grok.com" in p.url:
+                page = p
+                break
+        if not page:
+            page = await self.context.new_page()
+            await page.goto(target_url, wait_until="domcontentloaded")
+            await asyncio.sleep(2.5)
+        elif target_url not in page.url:
+            await page.goto(target_url, wait_until="domcontentloaded")
+            await asyncio.sleep(2.5)
+
+        self.grok_page = page
+        await page.bring_to_front()
+
+        # Check if file actions button exists in DOM and trigger menu
+        opened = await page.evaluate("""(docName) => {
+            const buttons = Array.from(document.querySelectorAll("button[aria-label*='Actions for']"));
+            const target = buttons.find(b => (b.getAttribute('aria-label') || '').toLowerCase().includes(docName.toLowerCase()));
+            if (target) {
+                target.scrollIntoView({ block: 'center', inline: 'center' });
+                target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+                target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                return true;
+            }
+            return false;
+        }""", doc_name)
+
+        if not opened:
+            logger.info(f"File '{doc_name}' action button not found in Grok project.")
+            return False
+
+        await asyncio.sleep(0.5)
+
+        del_option = page.locator("div[role='menuitem']:has-text('Delete'), [role='menuitem']:has-text('Delete'), button:has-text('Delete')")
+        if await del_option.count() > 0:
+            await del_option.first.click(force=True)
+            await asyncio.sleep(0.5)
+            confirm_btn = page.locator("div[role='dialog'] button:has-text('Delete'), button.btn-danger, button:has-text('Delete')")
+            if await confirm_btn.count() > 0 and await confirm_btn.first.is_visible():
+                await confirm_btn.first.click(force=True)
+            logger.info(f"Successfully deleted '{doc_name}' from Grok project.")
+            await asyncio.sleep(2.0)
+            return True
+        else:
+            await page.keyboard.press("Escape")
+            return False
+
+    async def upload_source_to_grok_project(
+        self,
+        project_url: str,
+        file_path: str,
+        doc_title: str = "",
+    ) -> bool:
+        """Uploads or replaces a source document directly into Grok Project files."""
+        if not self.context:
+            await self.start()
+
+        target_url = (project_url or self.grok_url or "https://grok.com/project/3a4c5217-9801-44e6-bb35-60f7e17eca21").strip()
+        abs_file_path = os.path.abspath(file_path)
+
+        if not os.path.exists(abs_file_path):
+            logger.error(f"File to upload does not exist at: {abs_file_path}. Cannot upload to Grok.")
+            return False
+
+        page = None
+        for p in self.context.pages:
+            if "grok.com" in p.url:
+                page = p
+                break
+
+        if not page:
+            page = await self.context.new_page()
+            await page.goto(target_url, wait_until="domcontentloaded")
+            await asyncio.sleep(2.5)
+        elif target_url not in page.url:
+            await page.goto(target_url, wait_until="domcontentloaded")
+            await asyncio.sleep(2.5)
+
+        self.grok_page = page
+        await page.bring_to_front()
+
+        doc_name = doc_title or os.path.basename(abs_file_path)
+
+        # Step 0: Remove old versions of this document before uploading new version
+        await self.remove_old_grok_project_files(page, doc_name)
+
+        logger.info(f"Updating Grok project at {target_url} with '{doc_name}'...")
+
+        try:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
+
+            # 1. Click Upload button in Grok project toolbar
+            upload_btn = page.locator("button[aria-label='Upload'], button:has-text('Upload')").first
+            if await upload_btn.count() > 0:
+                await page.evaluate("""(el) => {
+                    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+                    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                }""", await upload_btn.element_handle())
+                await asyncio.sleep(0.8)
+
+                upload_files_item = page.locator("div[role='menuitem']:has-text('Upload files'), [role='menuitem']:has-text('Upload files')").first
+                if await upload_files_item.count() > 0:
+                    async with page.expect_file_chooser(timeout=10000) as fc_info:
+                        await upload_files_item.click(force=True)
+                    file_chooser = await fc_info.value
+                    await file_chooser.set_files(abs_file_path)
+                    logger.info(f"Attached '{doc_name}' to Grok project via file chooser. Waiting for upload...")
+                    await asyncio.sleep(4.0)
+                    return True
+
+            # 2. Fallback: direct file input
+            file_inputs = page.locator("section:has-text('Files') input[type='file'], input[type='file']")
+            if await file_inputs.count() > 0:
+                await file_inputs.first.set_input_files(abs_file_path)
+                logger.info(f"Attached '{doc_name}' directly to Grok file input. Waiting for upload...")
+                await asyncio.sleep(4.0)
+                return True
+
+            logger.warning("No upload button or file input found in Grok project view.")
+            return False
+        except Exception as e_up:
+            logger.warning(f"Grok project file upload exception: {e_up}. Continuing...")
             return False
 
     async def upload_source_to_notebooklm(
