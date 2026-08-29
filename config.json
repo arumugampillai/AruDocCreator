@@ -70,13 +70,10 @@
   },
   "ui": {
     "active_tab": 3,
-    "selected_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.6.0.md",
-    "selected_plan_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.6.0.md",
-    "selected_broadcast_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.6.0.md"
+    "selected_doc": "00-ABOUT-ARUMLSTUDIO.md",
+    "selected_plan_doc": "F0-AVERAGING_ENGINE_POLICY_RESEARCH_SPECIFICATION.md",
+    "selected_broadcast_doc": "F7-COMPUTATIONAL_FORMULA_CONTRACT_v5.3.0.md"
   },
-
-
-
   "agents": {
     "plan_agent1": "Grok",
     "plan_agent2": "Gemini",
@@ -84,7 +81,7 @@
     "plan_agent4": "Grok"
   },
   "broadcast_agents": {
-    "chatgpt": true,
+    "chatgpt": false,
     "notebooklm": false,
     "gemini": true,
     "grok": true,

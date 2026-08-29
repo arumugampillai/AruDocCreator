@@ -1001,27 +1001,44 @@ class BroadcastWorker(QThread):
 
             step_pct = 85.0 / total
 
-            # Initialize Aggregated Markdown Document on disk immediately
+            # Initialize Aggregated Recommendations Document on disk immediately
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             timestamp_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
             workspace_dir = self.config.get("workspace", {}).get("dir", "./workspace")
             os.makedirs(workspace_dir, exist_ok=True)
-            saved_filename = f"BROADCAST_RESPONSES_{timestamp_tag}.md"
+
+            agent_slugs = []
+            for a in self.selected_agents:
+                al = a.lower().replace(" ", "")
+                if al == "chatgpt":
+                    agent_slugs.append("gpt")
+                elif al == "notebooklm":
+                    agent_slugs.append("nb")
+                else:
+                    agent_slugs.append(al)
+            agent_str = "-".join(agent_slugs) if agent_slugs else "all"
+
+            if self.doc_name and self.doc_name != "None":
+                doc_clean = re.sub(r"\.md$", "", os.path.basename(self.doc_name), flags=re.IGNORECASE).strip()
+                saved_filename = f"rec-for-{doc_clean}-from-{agent_str}.md"
+            else:
+                saved_filename = f"rec-from-{agent_str}_{timestamp_tag}.md"
+
             saved_filepath = os.path.join(workspace_dir, saved_filename)
 
             doc_line = f"**Attached Document:** `{self.doc_name}`  \n" if (self.doc_name and self.doc_name != "None") else ""
             header_text = (
-                f"# Multi-Agent Broadcast Responses\n"
+                f"# Multi-Agent Recommendations\n"
                 f"**Timestamp:** {now_str}  \n"
                 f"**Target Agents:** {', '.join(self.selected_agents)}  \n"
                 f"{doc_line}"
-                f"## 📝 Broadcast Prompt\n"
+                f"## 📝 Prompt\n"
                 f"> {self.user_prompt.strip()}\n\n"
                 f"---\n\n"
             )
             with open(saved_filepath, "w", encoding="utf-8") as f:
                 f.write(header_text)
-            self.log_signal.emit(f"Created broadcast responses file: {saved_filename}", "info")
+            self.log_signal.emit(f"Created recommendations file: {saved_filename}", "info")
 
             for i, agent in enumerate(self.selected_agents):
                 if self.is_cancelled:
@@ -2064,15 +2081,65 @@ class MainWindow(QMainWindow):
         self.txt_output_critique = QTextBrowser()
         self.output_tabs.addTab(self.txt_output_critique, "Stage 2: NotebookLM Evaluation")
 
-        # Output Tab 3: Recommendations (Live Multi-Agent Streaming)
-        self.txt_output_recommendations = QTextBrowser()
-        self.txt_output_recommendations.setOpenExternalLinks(True)
-        self.output_tabs.addTab(self.txt_output_recommendations, "Recommendations")
+        # Output Tab 3: Recommendations (Nested sub-tabs per agent + All Combined)
+        self.tab_recommendations_container = QWidget()
+        layout_rec_container = QVBoxLayout(self.tab_recommendations_container)
+        layout_rec_container.setContentsMargins(0, 0, 0, 0)
+        layout_rec_container.setSpacing(4)
 
-        # Output Tab 4: Multi-Agent Responses
-        self.txt_output_broadcast = QTextBrowser()
-        self.txt_output_broadcast.setOpenExternalLinks(True)
-        self.output_tabs.addTab(self.txt_output_broadcast, "Multi-Agent Responses")
+        self.rec_tabs = QTabWidget()
+        self.rec_tabs.setStyleSheet("QTabBar::tab { font-size: 11px; font-weight: bold; padding: 4px 10px; }")
+
+        # Sub-tab 0: All Combined
+        self.txt_rec_all = QTextBrowser()
+        self.txt_rec_all.setOpenExternalLinks(True)
+        self.rec_tabs.addTab(self.txt_rec_all, "📋 All Combined")
+
+        # Sub-tab 1: ChatGPT
+        self.txt_rec_chatgpt = QTextBrowser()
+        self.txt_rec_chatgpt.setOpenExternalLinks(True)
+        self.rec_tabs.addTab(self.txt_rec_chatgpt, "ChatGPT")
+
+        # Sub-tab 2: NotebookLM
+        self.txt_rec_notebooklm = QTextBrowser()
+        self.txt_rec_notebooklm.setOpenExternalLinks(True)
+        self.rec_tabs.addTab(self.txt_rec_notebooklm, "NotebookLM")
+
+        # Sub-tab 3: Gemini
+        self.txt_rec_gemini = QTextBrowser()
+        self.txt_rec_gemini.setOpenExternalLinks(True)
+        self.rec_tabs.addTab(self.txt_rec_gemini, "Gemini")
+
+        # Sub-tab 4: Grok
+        self.txt_rec_grok = QTextBrowser()
+        self.txt_rec_grok.setOpenExternalLinks(True)
+        self.rec_tabs.addTab(self.txt_rec_grok, "Grok")
+
+        # Sub-tab 5: Claude
+        self.txt_rec_claude = QTextBrowser()
+        self.txt_rec_claude.setOpenExternalLinks(True)
+        self.rec_tabs.addTab(self.txt_rec_claude, "Claude")
+
+        # Sub-tab 6: Copilot
+        self.txt_rec_copilot = QTextBrowser()
+        self.txt_rec_copilot.setOpenExternalLinks(True)
+        self.rec_tabs.addTab(self.txt_rec_copilot, "Copilot")
+
+        self.agent_rec_browsers = {
+            "ChatGPT": self.txt_rec_chatgpt,
+            "NotebookLM": self.txt_rec_notebooklm,
+            "Gemini": self.txt_rec_gemini,
+            "Grok": self.txt_rec_grok,
+            "Claude": self.txt_rec_claude,
+            "Copilot": self.txt_rec_copilot,
+        }
+
+        # Backwards-compatible aliases
+        self.txt_output_recommendations = self.txt_rec_all
+        self.txt_output_broadcast = self.txt_rec_all
+
+        layout_rec_container.addWidget(self.rec_tabs)
+        self.output_tabs.addTab(self.tab_recommendations_container, "Recommendations")
 
         # Output Tab 5: Git History
         tab_history = QWidget()
@@ -2948,18 +3015,26 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(True)
         self.progress_bar.setValue(0)
 
-        # Clear and prepare Recommendations & Multi-Agent Responses view
+        # Clear and prepare Recommendations view with sub-tabs
         doc_sub = f"\n**Attached Document:** `{selected_doc_name}`\n" if (should_attach and selected_doc_name != "None") else ""
         init_md = (
-            f"# 🚀 Multi-Agent Recommendations & Responses\n\n"
+            f"# 🚀 Multi-Agent Recommendations\n\n"
             f"**Broadcasting to:** {', '.join(selected_agents)}{doc_sub}\n\n"
             f"**Prompt:**\n> {prompt}\n\n"
             f"---\n\n"
-            f"⏳ *Broadcasting in progress... Responses will appear below live one by one as each agent finishes.*\n"
+            f"⏳ *Broadcasting in progress... Responses will appear below live as each agent finishes.*\n"
         )
-        self.txt_output_recommendations.setMarkdown(init_md)
-        self.txt_output_broadcast.setMarkdown(init_md)
-        self.output_tabs.setCurrentWidget(self.txt_output_recommendations)  # Switch to Recommendations tab immediately
+        self.txt_rec_all.setMarkdown(init_md)
+        if hasattr(self, "agent_rec_browsers"):
+            for ag_name, browser in self.agent_rec_browsers.items():
+                if ag_name in selected_agents:
+                    browser.setMarkdown(f"# 🤖 {ag_name} Recommendation\n\n⏳ *Waiting for response...*")
+                else:
+                    browser.setMarkdown(f"*{ag_name} was not selected for this broadcast.*")
+
+        if hasattr(self, "tab_recommendations_container"):
+            self.output_tabs.setCurrentWidget(self.tab_recommendations_container)
+            self.rec_tabs.setCurrentIndex(0)  # Default to 'All Combined' tab
 
         self._append_log(f"Starting Multi-Agent Broadcast to {len(selected_agents)} agents: {', '.join(selected_agents)} (Attached Doc: {selected_doc_name if should_attach else 'None'})...", "info")
 
@@ -2989,16 +3064,20 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Broadcast stopping...")
 
     def _on_broadcast_agent_response(self, agent_name: str, response_text: str):
-        """Append agent's reply live to Recommendations and Multi-Agent Responses tabs as they arrive."""
-        for target_widget in [self.txt_output_recommendations, self.txt_output_broadcast]:
-            current_md = target_widget.toMarkdown()
-            if "⏳ *Broadcasting in progress..." in current_md:
-                current_md = current_md.replace("⏳ *Broadcasting in progress... Responses will appear below live one by one as each agent finishes.*", "")
-            if "*Waiting for responses...*" in current_md:
-                current_md = current_md.replace("*Waiting for responses...*", "")
-            current_md += f"\n\n# 🤖 {agent_name} Response\n\n{response_text.strip()}\n\n---\n"
-            target_widget.setMarkdown(current_md)
-            target_widget.moveCursor(QTextCursor.End)
+        """Append agent's reply live to All Combined and individual agent sub-tab as they arrive."""
+        # 1. Update All Combined sub-tab
+        current_md = self.txt_rec_all.toMarkdown()
+        if "⏳ *Broadcasting in progress..." in current_md:
+            current_md = current_md.replace("⏳ *Broadcasting in progress... Responses will appear below live as each agent finishes.*", "")
+        if "*Waiting for responses...*" in current_md:
+            current_md = current_md.replace("*Waiting for responses...*", "")
+        current_md += f"\n\n# 🤖 {agent_name} Recommendation\n\n{response_text.strip()}\n\n---\n"
+        self.txt_rec_all.setMarkdown(current_md)
+        self.txt_rec_all.moveCursor(QTextCursor.End)
+
+        # 2. Update dedicated agent sub-tab
+        if hasattr(self, "agent_rec_browsers") and agent_name in self.agent_rec_browsers:
+            self.agent_rec_browsers[agent_name].setMarkdown(f"# 🤖 {agent_name} Recommendation\n\n{response_text.strip()}")
 
     def _on_broadcast_finished(self, success: bool, full_markdown: str, file_path: str):
         """Handler when multi-agent broadcast completes."""
@@ -3012,14 +3091,14 @@ class MainWindow(QMainWindow):
             self.last_broadcast_md = full_markdown
             self.last_broadcast_file = file_path
             self.btn_broadcast_download.setEnabled(True)
-            self.txt_output_recommendations.setMarkdown(full_markdown)
-            self.txt_output_broadcast.setMarkdown(full_markdown)
-            self.output_tabs.setCurrentWidget(self.txt_output_recommendations)  # Keep Recommendations active
+            self.txt_rec_all.setMarkdown(full_markdown)
+            if hasattr(self, "tab_recommendations_container"):
+                self.output_tabs.setCurrentWidget(self.tab_recommendations_container)
             self._append_log(f"Multi-Agent Broadcast completed! Saved to {os.path.basename(file_path)}", "success")
             QMessageBox.information(
                 self,
                 "Broadcast Complete",
-                f"Successfully received replies from all selected agents!\n\nSaved to:\n{file_path}\n\nYou can view full responses in the 'Recommendations' tab or click Download."
+                f"Successfully received replies from all selected agents!\n\nSaved to:\n{file_path}\n\nYou can view full responses in the 'Recommendations' sub-tabs or click Download."
             )
         else:
             self._append_log(f"Multi-Agent Broadcast ended: {full_markdown}", "error")
