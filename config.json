@@ -1,0 +1,67 @@
+{
+  "ollama": {
+    "base_url": "http://localhost:11434",
+    "model": "qwen3:4b",
+    "fallback_model": "qwen2.5:3b",
+    "temperature": 0.2,
+    "timeout_seconds": 120
+  },
+  "browser": {
+    "use_existing_chrome": true,
+    "cdp_url": "http://127.0.0.1:9222",
+    "user_data_dir": "./browser_profile",
+    "headless": false,
+    "slow_mo_ms": 50,
+    "default_timeout_ms": 60000,
+    "stream_poll_interval_ms": 300,
+    "stream_settle_timeout_ms": 1000
+  },
+  "orchestration": {
+    "plan_iterations": 1
+  },
+  "services": {
+    "chatgpt": {
+      "url": "https://chatgpt.com/",
+      "name": "ChatGPT",
+      "library_url": "https://chatgpt.com/library/d/6a723b6fe06c819199240f5a593f7ab4"
+    },
+    "gemini": {
+      "url": "https://gemini.google.com/notebook/b7a81a2b-5485-493a-bbfb-cbe58808dfc3",
+      "name": "Gemini"
+    },
+    "notebooklm": {
+      "url": "https://notebook.google.com/notebook/b7a81a2b-5485-493a-bbfb-cbe58808dfc3",
+      "name": "NotebookLM",
+      "target_notebook_id": "b7a81a2b-5485-493a-bbfb-cbe58808dfc3"
+    },
+    "default_critic": "notebooklm",
+    "grok": {
+      "url": "https://grok.com/project/3a4c5217-9801-44e6-bb35-60f7e17eca21"
+    }
+  },
+  "prompts": {
+    "stage1_prompt": "collect import point from this reply of my friends  and what suit for this enhancement. and importantly dont miss old points. you neeed to aggregate this as per doc, then will share it with my friend until it get finized",
+    "stage2_prompt": "review this document and review with existing architechure and find any logical loop hole and how to make it superior desighn and find flwas",
+    "custom_concept": "A high-throughput distributed event streaming platform with multi-region replication and real-time fraud detection.",
+    "stage3_prompt": "we need to give this to gemini coding agent so how to ask gemini to prepare implementation plans",
+    "prompt_gemini": "Please review this implementation plan against the actual codebase architecture. Identify missing implementation details, edge cases, class/module boundary violations, and performance bottlenecks.",
+    "doc_stage1_prompt": "collect import point from this reply of my friends  and what suit for this enhancement. and importantly dont miss old points. you neeed to aggregate this as per doc, then will share it with my friend until it get finized",
+    "doc_stage2_prompt": "review this document and review with existing architechure and find any logical loop hole and how to make it superior desighn and find flwas",
+    "doc_stage3_prompt": "we need to give this to gemini coding agent so how to ask gemini to prepare implementation plans",
+    "plan_chatgpt1_prompt": "you can find this document in library folder project-out-look  .collect import point from this reply of my friends and what suit for this enhancement. and importantly dont miss old points. you neeed to aggregate this as per doc, then will share it with my friend until it get finized",
+    "plan_gemini_prompt": "Please review this implementation plan against the actual codebase architecture. Identify missing implementation details, edge cases, class/module boundary violations, and performance bottlenecks.",
+    "plan_notebooklm_prompt": "review this document and review with existing architechure and find any logical loop hole and how to make it superior desighn and find flwas",
+    "plan_chatgpt_final_prompt": "i am using  coding agent for verifying the doc and update doc against existing code base. also you have anay opnion and finding that align with this idea.. it is kind of updatin doc"
+  },
+  "workspace": {
+    "dir": "./workspace",
+    "docs_dir": "C:\\Users\\admin\\PycharmProjects\\AruMLStudio\\docs",
+    "filename_prefix": "architecture_v",
+    "frozen_filename": "architecture_frozen.md"
+  },
+  "ui": {
+    "active_tab": 2,
+    "selected_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.1.0.md",
+    "selected_plan_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.1.0.md"
+  }
+}

@@ -1,0 +1,15 @@
+# Core GUI & Asynchronous Framework
+PySide6>=6.6.0
+
+# Browser Automation & Remote Debugging
+playwright>=1.40.0
+
+# Local Workspace Version Control
+gitpython>=3.1.40
+
+# HTTP & API Communication
+httpx>=0.25.0
+pydantic>=2.5.0
+
+# CLI Rich Formatting (Optional for orchestrator.py)
+rich>=13.7.0

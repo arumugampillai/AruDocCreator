@@ -1,0 +1,19 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches & temporary files
+.pytest_cache/
+*.log
+
+# Persistent Chrome browser profile (contains local cookies and tokens)
+browser_profile/
+
+# IDE files
+.idea/
+.vscode/
+
+# Local workspace runtime directory (initialized dynamically by WorkspaceRepoManager)
+workspace/
+
