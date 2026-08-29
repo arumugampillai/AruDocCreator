@@ -70,10 +70,11 @@
   },
   "ui": {
     "active_tab": 3,
-    "selected_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.4.0.md",
-    "selected_plan_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.4.0.md",
-    "selected_broadcast_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.4.0.md"
+    "selected_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.5.0.md",
+    "selected_plan_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.5.0.md",
+    "selected_broadcast_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.5.0.md"
   },
+
 
   "agents": {
     "plan_agent1": "Grok",
