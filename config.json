@@ -37,6 +37,14 @@
     "default_critic": "notebooklm",
     "grok": {
       "url": "https://grok.com/project/3a4c5217-9801-44e6-bb35-60f7e17eca21"
+    },
+    "claude": {
+      "url": "https://claude.ai/chat/bccf1a06-ab09-483d-8681-1d6682d682f7",
+      "name": "Claude"
+    },
+    "copilot": {
+      "url": "https://copilot.microsoft.com/projects/WYSvbmQqZXZMk49sA4Dr5",
+      "name": "Copilot"
     }
   },
   "prompts": {
@@ -51,7 +59,8 @@
     "plan_chatgpt1_prompt": "you can find this document in library folder project-out-look  .collect import point from this reply of my friends and what suit for this enhancement. and importantly dont miss old points. you neeed to aggregate this as per doc, then will share it with my friend until it get finized",
     "plan_gemini_prompt": "Please review this implementation plan against the actual codebase architecture. Identify missing implementation details, edge cases, class/module boundary violations, and performance bottlenecks.",
     "plan_notebooklm_prompt": "review this document and review with existing architechure and find any logical loop hole and how to make it superior desighn and find flwas",
-    "plan_chatgpt_final_prompt": "i am using  coding agent for verifying the doc and update doc against existing code base. also you have anay opnion and finding that align with this idea.. it is kind of updatin doc"
+    "plan_chatgpt_final_prompt": "i am using  coding agent for verifying the doc and update doc against existing code base. also you have anay opnion and finding that align with this idea.. it is kind of updatin doc",
+    "broadcast_prompt": "review this doc and make sure it align with entire app architechure ,, how to make it perpect ..only about this enhancement what should be add and logical loop hole and any flaw ans what else we can add into this enhancment"
   },
   "workspace": {
     "dir": "./workspace",
@@ -60,8 +69,27 @@
     "frozen_filename": "architecture_frozen.md"
   },
   "ui": {
-    "active_tab": 2,
-    "selected_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.1.0.md",
-    "selected_plan_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.1.0.md"
+    "active_tab": 3,
+    "selected_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.3.0.md",
+    "selected_plan_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.3.0.md",
+    "selected_broadcast_doc": "F1-RESEARCH_SELECTION_BIAS_CONTROL_v6.3.0.md"
+  },
+
+  "agents": {
+    "plan_agent1": "Grok",
+    "plan_agent2": "Gemini",
+    "plan_agent3": "Grok",
+    "plan_agent4": "Grok"
+  },
+  "broadcast_agents": {
+    "chatgpt": true,
+    "notebooklm": false,
+    "gemini": true,
+    "grok": true,
+    "claude": true,
+    "copilot": false
+  },
+  "broadcast": {
+    "attach_doc": true
   }
 }
