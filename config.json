@@ -30,7 +30,7 @@
       "name": "Gemini"
     },
     "notebooklm": {
-      "url": "https://notebook.google.com/notebook/b7a81a2b-5485-493a-bbfb-cbe58808dfc3",
+      "url": "https://notebook.google.com/notebook/1ee1dcc7-f190-499a-9702-96fb8ac7014c",
       "name": "NotebookLM",
       "target_notebook_id": "b7a81a2b-5485-493a-bbfb-cbe58808dfc3"
     },
@@ -69,10 +69,10 @@
     "frozen_filename": "architecture_frozen.md"
   },
   "ui": {
-    "active_tab": 3,
+    "active_tab": 2,
     "selected_doc": "00-ABOUT-ARUMLSTUDIO.md",
     "selected_plan_doc": "F0-AVERAGING_ENGINE_POLICY_RESEARCH_SPECIFICATION.md",
-    "selected_broadcast_doc": "F7-COMPUTATIONAL_FORMULA_CONTRACT_v5.3.0.md"
+    "selected_broadcast_doc": "None"
   },
   "agents": {
     "plan_agent1": "Grok",
